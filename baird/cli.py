@@ -18,7 +18,12 @@ from rich.console import Console
 
 from . import __version__
 
-app = typer.Typer(no_args_is_help=True, add_completion=False, help="BAIRD — Bioinformatics AI Research Daemon")
+app = typer.Typer(
+    no_args_is_help=True,
+    add_completion=False,
+    invoke_without_command=True,
+    help="BAIRD — Bioinformatics AI Research Daemon",
+)
 project_app = typer.Typer(help="Project management")
 task_app = typer.Typer(help="Background task management")
 hub_app = typer.Typer(help="Hub service")
@@ -31,9 +36,15 @@ console = Console()
 
 
 @app.callback()
-def main(version: bool = typer.Option(False, "--version", help="Show version and exit")) -> None:
+def main(
+    ctx: typer.Context,
+    version: bool = typer.Option(False, "--version", help="Show version and exit"),
+) -> None:
     if version:
         console.print(f"baird {__version__}")
+        raise typer.Exit()
+    if ctx.invoked_subcommand is None:
+        console.print(ctx.get_help())
         raise typer.Exit()
 
 
