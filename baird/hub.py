@@ -3,8 +3,9 @@
 Exposes the registry and memory APIs over HTTP. Watchdog daemons and the
 harness orchestrator hit this from any host on the Tailnet.
 
-Phase 1 surface: file dedup-on-write, list with filters, sha256 patching.
-The memory routes and the rest of the registry routes land in later phases.
+Routing layout: this module owns app construction + the registry (files) routes;
+the rest of the surface (`projects`, `decisions`, `actions`, `sessions`,
+`notifications`, `recall`) lives in `hub_routes/*` and is wired in here.
 
 Use `create_app(hub_cfg)` to construct an app bound to a specific config —
 useful for tests. The module-level `app` is bound to the default user config.
@@ -88,13 +89,21 @@ def get_registry(request: Request) -> Iterator[Session]:
         yield s
 
 
+def get_memory(request: Request) -> Iterator[Session]:
+    """FastAPI dependency: yields a memory SQLAlchemy session from app.state."""
+    factory = request.app.state.memory_session
+    with factory() as s:
+        yield s
+
+
 def create_app(hub_cfg: Optional[HubConfig] = None) -> FastAPI:
     cfg = hub_cfg or load_hub_config()
     registry_engine = create_registry_engine(cfg.registry_db)
-    create_memory_engine(cfg.memory_db)  # ensure the memory DB exists too
+    memory_engine = create_memory_engine(cfg.memory_db)
 
     app = FastAPI(title="BAIRD hub", version="0.0.1")
     app.state.registry_session = make_session_factory(registry_engine)
+    app.state.memory_session = make_session_factory(memory_engine)
 
     @app.get("/health")
     def health() -> dict:
@@ -114,7 +123,6 @@ def create_app(hub_cfg: Optional[HubConfig] = None) -> FastAPI:
 
         if existing and _fingerprint_matches(existing, file):
             existing.last_seen_at = now
-            # If the caller supplied a sha256 and we didn't have one, fill it in.
             if file.sha256 and not existing.sha256:
                 existing.sha256 = file.sha256
                 existing.sha256_status = "computed"
@@ -177,6 +185,11 @@ def create_app(hub_cfg: Optional[HubConfig] = None) -> FastAPI:
         s.commit()
         s.refresh(row)
         return _to_out(row)
+
+    # ---- Phase 2 routes (registered from sibling module) ----
+    from . import hub_memory
+
+    hub_memory.register_routes(app)
 
     return app
 

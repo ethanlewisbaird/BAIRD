@@ -1,12 +1,19 @@
 """Client library for the hub's REST API.
 
-The narrow public surface designed in Phase 2 — `record_decision`, `start_action`,
-`recall`, `register_file`, etc. — gets implemented here on top of httpx.
+The narrow public surface designed in Phase 2 — projects, decisions, actions
+(with a `start_action` context manager), file lineage, sessions/messages,
+notifications, and a unified `recall` — implemented over httpx.
 
-Phase 1 has just the file-registry methods. The rest land in Phase 2.
+Callers (the watchdog daemon, the CLI, the orchestrator) should use this
+client rather than hitting routes directly so the API surface is the only
+contract that needs to stay stable.
 """
 
 from __future__ import annotations
+
+import datetime as dt
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 import httpx
 
@@ -25,12 +32,14 @@ class HubClient:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    # ---- Registry ----
+    # ---- Health ----
 
     def health(self) -> dict:
         r = self._client.get("/health")
         r.raise_for_status()
         return r.json()
+
+    # ---- Registry: files ----
 
     def register_file(
         self,
@@ -98,3 +107,252 @@ class HubClient:
         r = self._client.patch(f"/files/{file_id}", json=body)
         r.raise_for_status()
         return r.json()
+
+    # ---- Projects ----
+
+    def upsert_project(
+        self,
+        *,
+        id: str,
+        name: str,
+        github: str | None = None,
+        context: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> dict:
+        r = self._client.post(
+            "/projects",
+            json={
+                "id": id,
+                "name": name,
+                "github": github,
+                "context": context,
+                "config": config or {},
+            },
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def get_project(self, project_id: str) -> dict:
+        r = self._client.get(f"/projects/{project_id}")
+        r.raise_for_status()
+        return r.json()
+
+    def list_projects(self) -> list[dict]:
+        r = self._client.get("/projects")
+        r.raise_for_status()
+        return r.json()
+
+    # ---- Decisions ----
+
+    def record_decision(self, project_id: str, text: str, *, author: str = "user") -> dict:
+        r = self._client.post(
+            f"/projects/{project_id}/decisions",
+            json={"project_id": project_id, "text": text, "author": author},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def list_decisions(self, project_id: str, *, limit: int = 50) -> list[dict]:
+        r = self._client.get(
+            f"/projects/{project_id}/decisions", params={"limit": limit}
+        )
+        r.raise_for_status()
+        return r.json()
+
+    # ---- Actions ----
+
+    def create_action(self, **fields: Any) -> dict:
+        r = self._client.post("/actions", json=fields)
+        r.raise_for_status()
+        return r.json()
+
+    def finish_action(
+        self,
+        action_id: str,
+        *,
+        exit_code: int | None = None,
+        summary: str | None = None,
+        finished_at: dt.datetime | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {}
+        if exit_code is not None:
+            body["exit_code"] = exit_code
+        if summary is not None:
+            body["summary"] = summary
+        body["finished_at"] = (finished_at or dt.datetime.now(dt.timezone.utc)).isoformat()
+        r = self._client.patch(f"/actions/{action_id}", json=body)
+        r.raise_for_status()
+        return r.json()
+
+    def list_actions(self, *, project_id: str | None = None, limit: int = 50) -> list[dict]:
+        params: dict[str, Any] = {"limit": limit}
+        if project_id:
+            params["project_id"] = project_id
+        r = self._client.get("/actions", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def get_action(self, action_id: str) -> dict:
+        r = self._client.get(f"/actions/{action_id}")
+        r.raise_for_status()
+        return r.json()
+
+    def attach_file(self, action_id: str, file_id: str, role: str) -> dict:
+        r = self._client.post(
+            f"/actions/{action_id}/files",
+            json={"file_id": file_id, "role": role},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def file_lineage(self, file_id: str) -> dict:
+        r = self._client.get(f"/files/{file_id}/lineage")
+        r.raise_for_status()
+        return r.json()
+
+    @contextmanager
+    def start_action(self, **fields: Any) -> Iterator["ActionHandle"]:
+        """Context manager: opens an action row, lets the caller record I/O and
+        a summary, and patches the finish state on exit. Exit code defaults to
+        0 on clean exit, 1 if the block raised."""
+        action = self.create_action(**fields)
+        handle = ActionHandle(self, action)
+        try:
+            yield handle
+        except Exception:
+            if handle._exit_code is None:
+                handle._exit_code = 1
+            self.finish_action(
+                action["id"],
+                exit_code=handle._exit_code,
+                summary=handle._summary,
+            )
+            raise
+        else:
+            self.finish_action(
+                action["id"],
+                exit_code=handle._exit_code if handle._exit_code is not None else 0,
+                summary=handle._summary,
+            )
+
+    # ---- Sessions + messages ----
+
+    def new_session(
+        self, *, mode: str = "code", project_id: str | None = None, task_id: str | None = None
+    ) -> dict:
+        r = self._client.post(
+            "/sessions",
+            json={"mode": mode, "project_id": project_id, "task_id": task_id},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def append_message(
+        self,
+        session_id: str,
+        *,
+        role: str,
+        content: str,
+        tool_calls: dict | None = None,
+    ) -> dict:
+        r = self._client.post(
+            f"/sessions/{session_id}/messages",
+            json={"role": role, "content": content, "tool_calls": tool_calls},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def get_messages(self, session_id: str, *, limit: int = 200) -> list[dict]:
+        r = self._client.get(
+            f"/sessions/{session_id}/messages", params={"limit": limit}
+        )
+        r.raise_for_status()
+        return r.json()
+
+    # ---- Notifications ----
+
+    def create_notification(
+        self,
+        *,
+        kind: str,
+        title: str,
+        body: str | None = None,
+        project_id: str | None = None,
+        action_id: str | None = None,
+        task_id: str | None = None,
+    ) -> dict:
+        r = self._client.post(
+            "/notifications",
+            json={
+                "kind": kind,
+                "title": title,
+                "body": body,
+                "project_id": project_id,
+                "action_id": action_id,
+                "task_id": task_id,
+            },
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def list_notifications(
+        self, *, unresolved_only: bool = False, limit: int = 100
+    ) -> list[dict]:
+        r = self._client.get(
+            "/notifications",
+            params={"unresolved_only": unresolved_only, "limit": limit},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def resolve_notification(
+        self, notif_id: str, *, resolution: str, mark_read: bool = True
+    ) -> dict:
+        r = self._client.patch(
+            f"/notifications/{notif_id}",
+            json={"resolution": resolution, "read": mark_read},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    # ---- Recall ----
+
+    def recall(
+        self,
+        query: str,
+        *,
+        project_id: str | None = None,
+        k: int = 10,
+        sources: list[str] | None = None,
+    ) -> list[dict]:
+        params: dict[str, Any] = {"query": query, "k": k}
+        if project_id:
+            params["project_id"] = project_id
+        if sources:
+            params["sources"] = ",".join(sources)
+        r = self._client.get("/recall", params=params)
+        r.raise_for_status()
+        return r.json()["hits"]
+
+
+class ActionHandle:
+    """Companion object yielded by `HubClient.start_action`."""
+
+    def __init__(self, client: HubClient, action: dict):
+        self.client = client
+        self.action = action
+        self._exit_code: int | None = None
+        self._summary: str | None = None
+
+    @property
+    def id(self) -> str:
+        return self.action["id"]
+
+    def attach(self, file_id: str, role: str) -> dict:
+        return self.client.attach_file(self.id, file_id, role)
+
+    def set_summary(self, text: str) -> None:
+        self._summary = text
+
+    def set_exit_code(self, code: int) -> None:
+        self._exit_code = code
