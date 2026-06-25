@@ -55,9 +55,12 @@ def run_task_once(
     runnable = task.runnable
     started = time.monotonic()
 
-    # Stable session per task — but for now we make a fresh one each firing.
-    # The "persistent conversation thread" cross-firing state lands in 4b.
-    session = hub.new_session(mode="agent", project_id=runnable.project_id, task_id=task.id)
+    # Persistent per-task conversation thread (Phase 4b): one Session per
+    # task_id, reused across firings. Context compressor / rolling summary
+    # is its own slice — for now we cap history at the last 20 messages.
+    session = hub.find_or_create_session_for_task(
+        task_id=task.id, project_id=runnable.project_id, mode="agent"
+    )
 
     with hub.start_action(
         project_id=runnable.project_id,
@@ -67,12 +70,15 @@ def run_task_once(
         task_id=task.id,
         model_name=runnable.model,
     ) as action:
+        prior = hub.get_messages(session["id"], limit=20)
+        prior_msgs = [{"role": m["role"], "content": m["content"]} for m in prior]
         hub.append_message(session["id"], role="user", content=runnable.prompt)
+        prior_msgs.append({"role": "user", "content": runnable.prompt})
 
         try:
             completion = model_client.complete(
                 model=runnable.model,
-                messages=[{"role": "user", "content": runnable.prompt}],
+                messages=prior_msgs,
                 max_tokens=runnable.max_tokens,
                 temperature=runnable.temperature,
                 system=runnable.system,

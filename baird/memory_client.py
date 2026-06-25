@@ -285,6 +285,33 @@ class HubClient:
         r.raise_for_status()
         return r.json()
 
+    def list_sessions(
+        self,
+        *,
+        task_id: str | None = None,
+        project_id: str | None = None,
+        mode: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        params: dict[str, Any] = {"limit": limit}
+        if task_id:
+            params["task_id"] = task_id
+        if project_id:
+            params["project_id"] = project_id
+        if mode:
+            params["mode"] = mode
+        r = self._client.get("/sessions", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def find_or_create_session_for_task(
+        self, *, task_id: str, project_id: str | None = None, mode: str = "agent"
+    ) -> dict:
+        existing = self.list_sessions(task_id=task_id, mode=mode, limit=1)
+        if existing:
+            return existing[0]
+        return self.new_session(mode=mode, task_id=task_id, project_id=project_id)
+
     def append_message(
         self,
         session_id: str,

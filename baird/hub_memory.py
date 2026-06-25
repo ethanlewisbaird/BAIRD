@@ -522,6 +522,30 @@ def register_routes(app: FastAPI) -> None:
             created_at=row.created_at,
         )
 
+    @app.get("/sessions", response_model=list[SessionOut])
+    def list_sessions(
+        task_id: Optional[str] = Query(None),
+        project_id: Optional[str] = Query(None),
+        mode: Optional[str] = Query(None),
+        limit: int = Query(20, le=200),
+        s: Session = Depends(get_memory),
+    ) -> list:
+        q = select(SessionRow)
+        if task_id is not None:
+            q = q.where(SessionRow.task_id == task_id)
+        if project_id is not None:
+            q = q.where(SessionRow.project_id == project_id)
+        if mode is not None:
+            q = q.where(SessionRow.mode == mode)
+        q = q.order_by(desc(SessionRow.last_active_at)).limit(limit)
+        return [
+            SessionOut(
+                id=r.id, project_id=r.project_id, mode=r.mode, task_id=r.task_id,
+                started_at=r.started_at, last_active_at=r.last_active_at,
+            )
+            for r in s.scalars(q).all()
+        ]
+
     @app.get("/sessions/{session_id}/messages", response_model=list[MessageOut])
     def get_messages(
         session_id: str,

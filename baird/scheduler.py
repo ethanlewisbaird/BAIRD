@@ -29,17 +29,27 @@ import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from croniter import croniter
+from watchdog.events import FileSystemEvent, FileSystemEventHandler
+from watchdog.observers import Observer
 
 from .budgets import check_task_budget
 from .config import HubConfig
+from .event_bus import EventBus, default_bus
 from .memory_client import HubClient
 from .model import OpenRouterClient
 from .notifier import Notifier
 from .runner import run_task_once
-from .tasks import CronTrigger, IntervalTrigger, Task
+from .tasks import (
+    CronTrigger,
+    IntervalTrigger,
+    ReactiveTrigger,
+    Task,
+    WatchTrigger,
+)
 
 log = logging.getLogger("baird.scheduler")
 
@@ -84,20 +94,45 @@ class Scheduler:
     host_id: str | None = None
     max_workers: int = 3
     tick_seconds: float = 1.0
+    event_bus: EventBus = field(default_factory=lambda: default_bus)
+    # Minimum seconds between firings of the same watch-triggered task, to
+    # debounce rapid filesystem chatter (e.g. editor save bursts).
+    watch_debounce_s: float = 2.0
 
     _entries: dict[str, _ScheduleEntry] = field(default_factory=dict)
     _group_locks: dict[str, threading.Lock] = field(default_factory=dict)
     _stop: threading.Event = field(default_factory=threading.Event)
     _pool: ThreadPoolExecutor | None = None
+    _observers: list[Observer] = field(default_factory=list)
+    _unsubs: list[Callable[[], None]] = field(default_factory=list)
+    _last_event_fire: dict[str, dt.datetime] = field(default_factory=dict)
 
     # --- public lifecycle ----------------------------------------------
 
     def set_tasks(self, tasks: dict[str, Task]) -> None:
         """Replace the schedule wholesale. Existing in-flight firings are not
-        cancelled; the next_fire times are recomputed from now."""
+        cancelled; the next_fire times are recomputed from now. Watch + reactive
+        triggers are re-bound: prior subscriptions are dropped and rebuilt."""
+        # Tear down prior event/watch wiring.
+        for off in self._unsubs:
+            off()
+        self._unsubs.clear()
+        for obs in self._observers:
+            obs.stop()
+        for obs in self._observers:
+            obs.join(timeout=1.0)
+        self._observers.clear()
+
         now = _utcnow()
         new_entries: dict[str, _ScheduleEntry] = {}
         for tid, task in tasks.items():
+            trig = task.trigger
+            if isinstance(trig, WatchTrigger) and task.enabled:
+                self._bind_watch(task, trig)
+                continue
+            if isinstance(trig, ReactiveTrigger) and task.enabled:
+                self._bind_reactive(task, trig)
+                continue
             nf = next_fire_after(task, now)
             if nf is None:
                 continue
@@ -107,6 +142,57 @@ class Scheduler:
             )
         self._entries = new_entries
 
+    # --- watch / reactive binding --------------------------------------
+
+    def _bind_watch(self, task: Task, trig: WatchTrigger) -> None:
+        path = Path(trig.path).expanduser()
+        if not path.exists():
+            log.warning("watch trigger for task %s: path %s does not exist; skipping", task.id, path)
+            return
+        handler = _WatchHandler(self, task, trig)
+        obs = Observer()
+        obs.schedule(handler, str(path), recursive=True)
+        obs.start()
+        self._observers.append(obs)
+        log.info("watching %s for task %s (events=%s)", path, task.id, trig.events)
+
+    def _bind_reactive(self, task: Task, trig: ReactiveTrigger) -> None:
+        def _listener(event: str, payload: dict[str, Any]) -> None:
+            self._event_fire(task, source=f"event:{event}")
+
+        off = self.event_bus.subscribe(trig.event, _listener)
+        self._unsubs.append(off)
+        log.info("task %s subscribed to event '%s'", task.id, trig.event)
+
+    def _event_fire(self, task: Task, *, source: str) -> None:
+        """Common path for watch + reactive firings: debounce, budget-check,
+        spawn through the pool. Concurrency-group locks still apply."""
+        now = _utcnow()
+        last = self._last_event_fire.get(task.id)
+        if last is not None and (now - last).total_seconds() < self.watch_debounce_s:
+            return
+        self._last_event_fire[task.id] = now
+
+        check = check_task_budget(hub=self.hub, task=task, hub_cfg=self.hub_cfg)
+        if not check.ok:
+            log.info("event-fired task %s skipped: %s", task.id, check.reason)
+            if self.notifier is not None:
+                self.notifier.notify(
+                    kind="logged",
+                    title=f"task {task.id} skipped ({source})",
+                    body=check.reason,
+                    task_id=task.id,
+                )
+            return
+
+        if self._pool is None:
+            return  # scheduler not running
+        if task.concurrency_group:
+            lock = self._group_locks.setdefault(task.concurrency_group, threading.Lock())
+            self._pool.submit(self._wrap_with_lock(task, lock))
+        else:
+            self._pool.submit(lambda: self._do_fire(task))
+
     def run(self) -> None:
         """Block, ticking until `stop()` is called or SIGINT/SIGTERM arrives."""
         self._pool = ThreadPoolExecutor(max_workers=self.max_workers)
@@ -115,6 +201,14 @@ class Scheduler:
                 self._tick()
                 self._stop.wait(timeout=self.tick_seconds)
         finally:
+            for obs in self._observers:
+                obs.stop()
+            for obs in self._observers:
+                obs.join(timeout=1.0)
+            self._observers.clear()
+            for off in self._unsubs:
+                off()
+            self._unsubs.clear()
             assert self._pool is not None
             self._pool.shutdown(wait=True)
             self._pool = None
@@ -191,3 +285,31 @@ class Scheduler:
         # If the task is disabled or has no more fires, push it far into the
         # future so we don't busy-wake on it. Real cleanup happens on set_tasks().
         return nf or (after + dt.timedelta(days=365))
+
+
+class _WatchHandler(FileSystemEventHandler):
+    """Bridge watchdog events into Scheduler._event_fire."""
+
+    _EVENT_MAP = {
+        "created": "on_created",
+        "modified": "on_modified",
+        "moved": "on_moved",
+        "deleted": "on_deleted",
+    }
+
+    def __init__(self, scheduler: "Scheduler", task: Task, trig: WatchTrigger) -> None:
+        self._sched = scheduler
+        self._task = task
+        self._wanted = set(trig.events)
+
+    def _dispatch(self, kind: str, event: FileSystemEvent) -> None:
+        if event.is_directory:
+            return
+        if kind not in self._wanted:
+            return
+        self._sched._event_fire(self._task, source=f"watch:{kind}:{event.src_path}")
+
+    def on_created(self, event: FileSystemEvent) -> None: self._dispatch("created", event)
+    def on_modified(self, event: FileSystemEvent) -> None: self._dispatch("modified", event)
+    def on_moved(self, event: FileSystemEvent) -> None: self._dispatch("moved", event)
+    def on_deleted(self, event: FileSystemEvent) -> None: self._dispatch("deleted", event)

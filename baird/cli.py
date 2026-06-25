@@ -38,6 +38,7 @@ inbox_app = typer.Typer(help="Notification inbox", invoke_without_command=True)
 diff_app = typer.Typer(help="Diff review/apply")
 orchestrator_app = typer.Typer(help="Background-agent scheduler")
 registry_app = typer.Typer(help="Registry queries")
+session_app = typer.Typer(help="Multiplexer (tmux/screen) sessions")
 
 app.add_typer(project_app, name="project")
 app.add_typer(task_app, name="task")
@@ -46,6 +47,7 @@ app.add_typer(inbox_app, name="inbox")
 app.add_typer(diff_app, name="diff")
 app.add_typer(orchestrator_app, name="orchestrator")
 app.add_typer(registry_app, name="registry")
+app.add_typer(session_app, name="session")
 
 console = Console()
 
@@ -141,32 +143,22 @@ def code(
     except Exception:
         ctx = load_repo_context(root, hub=None)
 
-    rendered = render_context(ctx, token_budget=budget)
     if show_context:
-        console.print(rendered)
+        console.print(render_context(ctx, token_budget=budget))
         return
 
-    # Single-turn against OpenRouter. The full REPL (multi-turn + diff loop +
-    # tool calls) is its own slice — this is the smallest useful wiring.
-    from .model import ModelError, OpenRouterClient
+    # Multi-turn REPL (Phase 4b). Diff loop + tool calls come in a later slice.
+    from .model import OpenRouterClient
+    from .repl import ReplConfig, run_repl
 
-    user_msg = typer.prompt("user> ")
-    client = OpenRouterClient()
-    try:
-        completion = client.complete(
-            model="anthropic/claude-3-haiku",
-            messages=[{"role": "user", "content": user_msg}],
-            system=f"You are BAIRD, a bioinformatics research assistant. Project context follows.\n\n{rendered}",
+    with _hub_client_from_host() as hub:
+        run_repl(
+            repo_ctx=ctx,
+            hub=hub,
+            model_client=OpenRouterClient(),
+            config=ReplConfig(project_id=ctx.project.id),
+            console=console,
         )
-    except ModelError as e:
-        console.print(f"[red]model call failed: {e}[/red]")
-        raise typer.Exit(1) from e
-    console.print(completion.content)
-    console.print(
-        f"\n[dim]model={completion.model}  "
-        f"tokens={completion.usage.input_tokens}→{completion.usage.output_tokens}  "
-        f"cost=${completion.cost_usd:.4f}[/dim]"
-    )
 
 
 @app.command()
@@ -180,17 +172,63 @@ def chat() -> None:
 
 
 @app.command()
-def status() -> None:
-    """One-shot dashboard: hub health, counts, budget, inbox, recent activity, tasks."""
+def status(
+    watch: bool = typer.Option(False, "--watch", help="Live-refresh the dashboard"),
+    interval: float = typer.Option(2.0, "--interval", help="Refresh seconds when --watch"),
+) -> None:
+    """One-shot dashboard (or live with --watch)."""
+    import time as _time
+
+    from rich.console import Group
+    from rich.live import Live
+
     from .config import load_hub_config
-    from .dashboard import gather, render
+    from .dashboard import (
+        _budget_panel,
+        _counts_panel,
+        _inbox_panel,
+        _recent_actions_panel,
+        _tasks_panel,
+        render,
+    )
     from .tasks import load_tasks_dir
 
     hub_cfg = load_hub_config()
-    tasks = load_tasks_dir(_tasks_dir())
+    tasks_dir = _tasks_dir()
+
+    if not watch:
+        with _hub_client_from_host() as hub:
+            state = dashboard_gather(hub, hub_cfg, load_tasks_dir(tasks_dir))
+        render(state, console)
+        return
+
     with _hub_client_from_host() as hub:
-        state = dashboard_gather(hub, hub_cfg, tasks)
-    render(state, console)
+        def _snapshot() -> Group:
+            tasks = load_tasks_dir(tasks_dir)
+            state = dashboard_gather(hub, hub_cfg, tasks)
+            if not state.hub_ok:
+                from rich.panel import Panel as _Panel
+                return Group(_Panel.fit(
+                    f"[red]hub unreachable[/red] {state.hub_url}\n{state.error or ''}",
+                    title="status", border_style="red",
+                ))
+            panels = [
+                _counts_panel(state),
+                _budget_panel(state),
+                _inbox_panel(state),
+                _recent_actions_panel(state),
+            ]
+            if state.tasks:
+                panels.append(_tasks_panel(state))
+            return Group(*panels)
+
+        with Live(_snapshot(), console=console, refresh_per_second=4, screen=False) as live:
+            try:
+                while True:
+                    _time.sleep(interval)
+                    live.update(_snapshot())
+            except KeyboardInterrupt:
+                pass
 
 
 # Indirection so tests can monkeypatch the gather call point.
@@ -637,6 +675,60 @@ def orchestrator_serve(
         signal.signal(signal.SIGTERM, lambda *_: scheduler.stop())
         signal.signal(signal.SIGINT, lambda *_: scheduler.stop())
         scheduler.run()
+
+
+# ----- session (tmux/screen) -----
+
+
+def _multiplexer():
+    """Build a Multiplexer from host.yaml's session_multiplexer setting."""
+    from .session_mux import select_backend
+
+    host_path = Path("~/.baird/host.yaml").expanduser()
+    pref = "auto"
+    if host_path.exists():
+        try:
+            host_cfg = load_host_config(host_path)
+            pref = host_cfg.session_multiplexer or "auto"
+        except Exception:
+            pass
+    return select_backend(pref)
+
+
+@session_app.command("list")
+def session_list() -> None:
+    """List multiplexer sessions on this host."""
+    mux = _multiplexer()
+    sessions = mux.list_sessions()
+    if not sessions:
+        console.print(f"[dim]no {mux.backend} sessions[/dim]")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("name")
+    table.add_column("backend")
+    table.add_column("pid")
+    for s in sessions:
+        table.add_row(s.name, s.backend, str(s.pid) if s.pid is not None else "-")
+    console.print(table)
+
+
+@session_app.command("attach")
+def session_attach(name: str) -> None:
+    """Print the command to attach to the named session. Run via `eval $(baird session attach <name>)`."""
+    mux = _multiplexer()
+    cmd = mux.attach_cmd(name=name)
+    console.print(" ".join(cmd))
+
+
+@session_app.command("kill")
+def session_kill(name: str) -> None:
+    mux = _multiplexer()
+    ok = mux.kill(name=name)
+    if ok:
+        console.print(f"[green]killed[/green] {name}")
+    else:
+        console.print(f"[red]failed to kill[/red] {name}")
+        raise typer.Exit(1)
 
 
 # ----- daemon -----
