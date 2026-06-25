@@ -36,12 +36,14 @@ task_app = typer.Typer(help="Background task management")
 hub_app = typer.Typer(help="Hub service")
 inbox_app = typer.Typer(help="Notification inbox", invoke_without_command=True)
 diff_app = typer.Typer(help="Diff review/apply")
+orchestrator_app = typer.Typer(help="Background-agent scheduler")
 
 app.add_typer(project_app, name="project")
 app.add_typer(task_app, name="task")
 app.add_typer(hub_app, name="hub")
 app.add_typer(inbox_app, name="inbox")
 app.add_typer(diff_app, name="diff")
+app.add_typer(orchestrator_app, name="orchestrator")
 
 console = Console()
 
@@ -113,13 +115,31 @@ def code(
     except Exception:
         ctx = load_repo_context(root, hub=None)
 
+    rendered = render_context(ctx, token_budget=budget)
     if show_context:
-        console.print(render_context(ctx, token_budget=budget))
+        console.print(rendered)
         return
 
+    # Single-turn against OpenRouter. The full REPL (multi-turn + diff loop +
+    # tool calls) is its own slice — this is the smallest useful wiring.
+    from .model import ModelError, OpenRouterClient
+
+    user_msg = typer.prompt("user> ")
+    client = OpenRouterClient()
+    try:
+        completion = client.complete(
+            model="anthropic/claude-3-haiku",
+            messages=[{"role": "user", "content": user_msg}],
+            system=f"You are BAIRD, a bioinformatics research assistant. Project context follows.\n\n{rendered}",
+        )
+    except ModelError as e:
+        console.print(f"[red]model call failed: {e}[/red]")
+        raise typer.Exit(1) from e
+    console.print(completion.content)
     console.print(
-        "[yellow]`baird code` REPL is not yet wired (Phase 4 will add the OpenRouter call).[/yellow]\n"
-        "Use `--show-context` to inspect the per-turn context block."
+        f"\n[dim]model={completion.model}  "
+        f"tokens={completion.usage.input_tokens}→{completion.usage.output_tokens}  "
+        f"cost=${completion.cost_usd:.4f}[/dim]"
     )
 
 
@@ -253,11 +273,73 @@ def project_list() -> None:
 # ----- task -----
 
 
+def _tasks_dir() -> Path:
+    from .tasks import TASKS_DIR_DEFAULT
+    return Path(TASKS_DIR_DEFAULT).expanduser()
+
+
+@task_app.command("add")
+def task_add(task_id: str, force: bool = typer.Option(False, "--force")) -> None:
+    """Write a starter `~/.baird/tasks/<id>.yaml`."""
+    from .tasks import save_task, task_yaml_template
+
+    path = _tasks_dir() / f"{task_id}.yaml"
+    if path.exists() and not force:
+        console.print(f"[red]{path} already exists (use --force)[/red]")
+        raise typer.Exit(1)
+    save_task(task_yaml_template(task_id), path)
+    console.print(f"[green]wrote[/green] {path}")
+
+
+@task_app.command("list")
+def task_list() -> None:
+    """List tasks known to the orchestrator."""
+    from .tasks import load_tasks_dir
+
+    tasks = load_tasks_dir(_tasks_dir())
+    if not tasks:
+        console.print("[dim]no tasks[/dim]")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("id")
+    table.add_column("trigger")
+    table.add_column("enabled")
+    table.add_column("model")
+    table.add_column("budget")
+    for t in tasks.values():
+        trig = t.trigger.type
+        if hasattr(t.trigger, "cron"):
+            trig = f"cron({t.trigger.cron})"  # type: ignore[attr-defined]
+        elif hasattr(t.trigger, "interval_seconds"):
+            trig = f"every({t.trigger.interval_seconds}s)"  # type: ignore[attr-defined]
+        table.add_row(
+            t.id,
+            trig,
+            "yes" if t.enabled else "no",
+            t.runnable.model,
+            f"${t.budget.max_cost_usd:.2f}" if t.budget.max_cost_usd else "-",
+        )
+    console.print(table)
+
+
 @task_app.command("run")
 def task_run(task_id: str) -> None:
-    """Fire a background task once."""
-    console.print(f"[yellow]`baird task run {task_id}` not yet implemented (Phase 4)[/yellow]")
-    raise typer.Exit(1)
+    """Fire one task once, ignoring the schedule."""
+    from .model import OpenRouterClient
+    from .runner import run_task_once
+    from .tasks import load_tasks_dir
+
+    tasks = load_tasks_dir(_tasks_dir())
+    task = tasks.get(task_id)
+    if task is None:
+        console.print(f"[red]no task {task_id} in {_tasks_dir()}[/red]")
+        raise typer.Exit(1)
+
+    with _hub_client_from_host() as hub:
+        client = OpenRouterClient()
+        result = run_task_once(task, hub=hub, model_client=client)
+    console.print(f"[green]fired[/green] action={result.action_id[:12]} cost=${result.completion.cost_usd:.4f}")
+    console.print(result.summary or "")
 
 
 # ----- hub -----
@@ -314,6 +396,56 @@ def undo(repo: Path = typer.Option(Path.cwd(), "--repo")) -> None:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1) from e
     console.print(f"[green]reverted, new HEAD[/green] {new_sha[:12]}")
+
+
+# ----- orchestrator -----
+
+
+@orchestrator_app.command("serve")
+def orchestrator_serve(
+    interval: float = typer.Option(2.0, "--tick", help="Scheduler tick seconds"),
+    max_workers: int = typer.Option(3, "--max-workers"),
+) -> None:
+    """Run the background-agent scheduler on the hub.
+
+    Loads tasks from `~/.baird/tasks/*.yaml`, fires on each trigger, enforces
+    budgets, posts notifications. Blocks until SIGINT/SIGTERM."""
+    import os
+    import signal
+
+    from .config import load_hub_config
+    from .model import OpenRouterClient
+    from .notifier import Notifier, TelegramConfig, TelegramHTTPTransport
+    from .scheduler import Scheduler
+    from .tasks import load_tasks_dir
+
+    hub_cfg = load_hub_config()
+    tasks = load_tasks_dir(_tasks_dir())
+    console.print(f"[green]starting orchestrator[/green] tasks={len(tasks)} ceiling=${hub_cfg.daily_total_usd}/day")
+
+    telegram = None
+    transport = None
+    tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    tg_chat = os.getenv("TELEGRAM_CHAT_ID")
+    if tg_token and tg_chat:
+        telegram = TelegramConfig(bot_token=tg_token, chat_id=tg_chat)
+        transport = TelegramHTTPTransport(tg_token)
+
+    with _hub_client_from_host() as hub:
+        notifier = Notifier(hub=hub, telegram=telegram, transport=transport)
+        scheduler = Scheduler(
+            hub=hub,
+            model_client=OpenRouterClient(),
+            notifier=notifier,
+            hub_cfg=hub_cfg,
+            host_id=os.uname().nodename,
+            max_workers=max_workers,
+            tick_seconds=interval,
+        )
+        scheduler.set_tasks(tasks)
+        signal.signal(signal.SIGTERM, lambda *_: scheduler.stop())
+        signal.signal(signal.SIGINT, lambda *_: scheduler.stop())
+        scheduler.run()
 
 
 # ----- daemon -----

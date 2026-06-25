@@ -19,6 +19,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -96,6 +97,12 @@ class Action(RegistryBase):
 
     slurm_job_id: Mapped[str | None] = mapped_column(String, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)  # tier-2 AI summary
+
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
 
     children: Mapped[list["Action"]] = relationship(
         "Action", backref="parent", remote_side="Action.id"

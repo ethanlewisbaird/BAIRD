@@ -173,22 +173,47 @@ class HubClient:
         exit_code: int | None = None,
         summary: str | None = None,
         finished_at: dt.datetime | None = None,
+        cost_usd: float | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
     ) -> dict:
         body: dict[str, Any] = {}
         if exit_code is not None:
             body["exit_code"] = exit_code
         if summary is not None:
             body["summary"] = summary
+        if cost_usd is not None:
+            body["cost_usd"] = cost_usd
+        if input_tokens is not None:
+            body["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            body["output_tokens"] = output_tokens
         body["finished_at"] = (finished_at or dt.datetime.now(dt.timezone.utc)).isoformat()
         r = self._client.patch(f"/actions/{action_id}", json=body)
         r.raise_for_status()
         return r.json()
 
-    def list_actions(self, *, project_id: str | None = None, limit: int = 50) -> list[dict]:
+    def list_actions(
+        self,
+        *,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
         params: dict[str, Any] = {"limit": limit}
         if project_id:
             params["project_id"] = project_id
+        if task_id:
+            params["task_id"] = task_id
         r = self._client.get("/actions", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def budgets_usage(self, *, since_hours: int = 24, task_id: str | None = None) -> dict:
+        params: dict[str, Any] = {"since_hours": since_hours}
+        if task_id:
+            params["task_id"] = task_id
+        r = self._client.get("/budgets/usage", params=params)
         r.raise_for_status()
         return r.json()
 
@@ -212,9 +237,9 @@ class HubClient:
 
     @contextmanager
     def start_action(self, **fields: Any) -> Iterator["ActionHandle"]:
-        """Context manager: opens an action row, lets the caller record I/O and
-        a summary, and patches the finish state on exit. Exit code defaults to
-        0 on clean exit, 1 if the block raised."""
+        """Context manager: opens an action row, lets the caller record I/O,
+        a summary, and usage/cost, and patches the finish state on exit. Exit
+        code defaults to 0 on clean exit, 1 if the block raised."""
         action = self.create_action(**fields)
         handle = ActionHandle(self, action)
         try:
@@ -222,18 +247,22 @@ class HubClient:
         except Exception:
             if handle._exit_code is None:
                 handle._exit_code = 1
-            self.finish_action(
-                action["id"],
-                exit_code=handle._exit_code,
-                summary=handle._summary,
-            )
+            self._finish_from_handle(handle)
             raise
         else:
-            self.finish_action(
-                action["id"],
-                exit_code=handle._exit_code if handle._exit_code is not None else 0,
-                summary=handle._summary,
-            )
+            if handle._exit_code is None:
+                handle._exit_code = 0
+            self._finish_from_handle(handle)
+
+    def _finish_from_handle(self, handle: "ActionHandle") -> None:
+        self.finish_action(
+            handle.id,
+            exit_code=handle._exit_code,
+            summary=handle._summary,
+            cost_usd=handle._cost_usd,
+            input_tokens=handle._input_tokens,
+            output_tokens=handle._output_tokens,
+        )
 
     # ---- Sessions + messages ----
 
@@ -343,6 +372,9 @@ class ActionHandle:
         self.action = action
         self._exit_code: int | None = None
         self._summary: str | None = None
+        self._cost_usd: float | None = None
+        self._input_tokens: int | None = None
+        self._output_tokens: int | None = None
 
     @property
     def id(self) -> str:
@@ -356,3 +388,17 @@ class ActionHandle:
 
     def set_exit_code(self, code: int) -> None:
         self._exit_code = code
+
+    def record_usage(
+        self,
+        *,
+        cost_usd: float | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+    ) -> None:
+        if cost_usd is not None:
+            self._cost_usd = (self._cost_usd or 0.0) + cost_usd
+        if input_tokens is not None:
+            self._input_tokens = (self._input_tokens or 0) + input_tokens
+        if output_tokens is not None:
+            self._output_tokens = (self._output_tokens or 0) + output_tokens

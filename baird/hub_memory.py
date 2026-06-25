@@ -72,12 +72,17 @@ class ActionStart(BaseModel):
     conda_env: Optional[str] = None
     env_hash: Optional[str] = None
     slurm_job_id: Optional[str] = None
+    task_id: Optional[str] = None
+    model_name: Optional[str] = None
 
 
 class ActionPatch(BaseModel):
     finished_at: Optional[dt.datetime] = None
     exit_code: Optional[int] = None
     summary: Optional[str] = None
+    cost_usd: Optional[float] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
 
 
 class ActionOut(BaseModel):
@@ -95,6 +100,11 @@ class ActionOut(BaseModel):
     exit_code: Optional[int]
     slurm_job_id: Optional[str]
     summary: Optional[str]
+    task_id: Optional[str] = None
+    model_name: Optional[str] = None
+    cost_usd: Optional[float] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
 
 
 class FileActionIn(BaseModel):
@@ -184,6 +194,11 @@ def _action_out(row: Action) -> ActionOut:
         exit_code=row.exit_code,
         slurm_job_id=row.slurm_job_id,
         summary=row.summary,
+        task_id=row.task_id,
+        model_name=row.model_name,
+        cost_usd=row.cost_usd,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
     )
 
 
@@ -299,6 +314,8 @@ def register_routes(app: FastAPI) -> None:
             conda_env=payload.conda_env,
             env_hash=payload.env_hash,
             slurm_job_id=payload.slurm_job_id,
+            task_id=payload.task_id,
+            model_name=payload.model_name,
         )
         s.add(row)
         s.commit()
@@ -318,6 +335,12 @@ def register_routes(app: FastAPI) -> None:
             row.exit_code = payload.exit_code
         if payload.summary is not None:
             row.summary = payload.summary
+        if payload.cost_usd is not None:
+            row.cost_usd = payload.cost_usd
+        if payload.input_tokens is not None:
+            row.input_tokens = payload.input_tokens
+        if payload.output_tokens is not None:
+            row.output_tokens = payload.output_tokens
         s.commit()
         s.refresh(row)
         return _action_out(row)
@@ -325,14 +348,43 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/actions", response_model=list[ActionOut])
     def list_actions(
         project_id: Optional[str] = Query(None),
+        task_id: Optional[str] = Query(None),
         limit: int = Query(50, le=500),
         s: Session = Depends(get_registry),
     ) -> list:
         q = select(Action)
         if project_id is not None:
             q = q.where(Action.project_id == project_id)
+        if task_id is not None:
+            q = q.where(Action.task_id == task_id)
         q = q.order_by(desc(Action.started_at)).limit(limit)
         return [_action_out(r) for r in s.scalars(q).all()]
+
+    @app.get("/budgets/usage")
+    def budgets_usage(
+        since_hours: int = Query(24, ge=1, le=720),
+        task_id: Optional[str] = Query(None),
+        s: Session = Depends(get_registry),
+    ) -> dict:
+        from sqlalchemy import func
+        cutoff = _utcnow() - dt.timedelta(hours=since_hours)
+        q = select(
+            func.coalesce(func.sum(Action.cost_usd), 0.0),
+            func.coalesce(func.sum(Action.input_tokens), 0),
+            func.coalesce(func.sum(Action.output_tokens), 0),
+            func.count(Action.id),
+        ).where(Action.started_at >= cutoff)
+        if task_id is not None:
+            q = q.where(Action.task_id == task_id)
+        cost, in_tok, out_tok, n = s.execute(q).one()
+        return {
+            "since_hours": since_hours,
+            "task_id": task_id,
+            "cost_usd": float(cost or 0.0),
+            "input_tokens": int(in_tok or 0),
+            "output_tokens": int(out_tok or 0),
+            "actions": int(n or 0),
+        }
 
     @app.get("/actions/{action_id}", response_model=ActionOut)
     def get_action(action_id: str, s: Session = Depends(get_registry)) -> ActionOut:
