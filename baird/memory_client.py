@@ -3,7 +3,7 @@
 The narrow public surface designed in Phase 2 — `record_decision`, `start_action`,
 `recall`, `register_file`, etc. — gets implemented here on top of httpx.
 
-This is a skeleton; full surface filled in during Phase 2 implementation.
+Phase 1 has just the file-registry methods. The rest land in Phase 2.
 """
 
 from __future__ import annotations
@@ -63,4 +63,38 @@ class HubClient:
         r.raise_for_status()
         return r.json()
 
-    # TODO Phase 2: record_decision, start_action, recall, etc.
+    def list_files(
+        self,
+        *,
+        sha256_status: str | None = None,
+        storage_volume: str | None = None,
+        include_deleted: bool = False,
+        limit: int = 100,
+    ) -> list[dict]:
+        params: dict[str, object] = {
+            "include_deleted": include_deleted,
+            "limit": limit,
+        }
+        if sha256_status:
+            params["sha256_status"] = sha256_status
+        if storage_volume:
+            params["storage_volume"] = storage_volume
+        r = self._client.get("/files", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def patch_file(
+        self,
+        file_id: str,
+        *,
+        sha256: str | None = None,
+        sha256_status: str | None = None,
+    ) -> dict:
+        body: dict[str, object] = {}
+        if sha256 is not None:
+            body["sha256"] = sha256
+        if sha256_status is not None:
+            body["sha256_status"] = sha256_status
+        r = self._client.patch(f"/files/{file_id}", json=body)
+        r.raise_for_status()
+        return r.json()
