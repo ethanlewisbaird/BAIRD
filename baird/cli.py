@@ -156,7 +156,10 @@ def code(
             repo_ctx=ctx,
             hub=hub,
             model_client=OpenRouterClient(),
-            config=ReplConfig(project_id=ctx.project.id),
+            config=ReplConfig(
+                project_id=ctx.project.id,
+                project_root=ctx.project_root,
+            ),
             console=console,
         )
 
@@ -675,6 +678,105 @@ def orchestrator_serve(
         signal.signal(signal.SIGTERM, lambda *_: scheduler.stop())
         signal.signal(signal.SIGINT, lambda *_: scheduler.stop())
         scheduler.run()
+
+
+# ----- pipelines / research / improve -----
+
+
+@app.command()
+def snakemake(
+    workflow: Path = typer.Argument(..., exists=True, readable=True),
+    cwd: Path = typer.Option(None, "--cwd"),
+    project: str | None = typer.Option(None, "--project"),
+    extra: list[str] = typer.Argument(None, help="Extra snakemake args (after --)"),
+) -> None:
+    """Run a Snakemake workflow and post the result back to the hub."""
+    from .pipelines import snakemake_run
+
+    with _hub_client_from_host() as hub:
+        res = snakemake_run(
+            workflow=workflow,
+            extra_args=list(extra or []),
+            cwd=cwd,
+            hub=hub,
+            project_id=project,
+        )
+    console.print(res.summary)
+    raise typer.Exit(res.exit_code)
+
+
+@app.command()
+def nextflow(
+    workflow: Path = typer.Argument(..., exists=True, readable=True),
+    cwd: Path = typer.Option(None, "--cwd"),
+    project: str | None = typer.Option(None, "--project"),
+    extra: list[str] = typer.Argument(None, help="Extra nextflow args (after --)"),
+) -> None:
+    """Run a Nextflow workflow and post the result back to the hub."""
+    from .pipelines import nextflow_run
+
+    with _hub_client_from_host() as hub:
+        res = nextflow_run(
+            workflow=workflow,
+            extra_args=list(extra or []),
+            cwd=cwd,
+            hub=hub,
+            project_id=project,
+        )
+    console.print(res.summary)
+    raise typer.Exit(res.exit_code)
+
+
+@app.command()
+def improve(
+    since_hours: int = typer.Option(24, "--since-hours"),
+    model: str = typer.Option("anthropic/claude-3.5-sonnet", "--model"),
+) -> None:
+    """Fire one self-improvement cycle now."""
+    from .model import OpenRouterClient
+    from .notifier import Notifier
+    from .self_improve import run_self_improvement
+
+    with _hub_client_from_host() as hub:
+        notifier = Notifier(hub=hub, telegram=None)
+        res = run_self_improvement(
+            hub=hub,
+            model_client=OpenRouterClient(),
+            notifier=notifier,
+            since_hours=since_hours,
+            model=model,
+            tasks_dir=_tasks_dir(),
+        )
+    console.print(
+        f"[green]done[/green] proposals={len(res.proposals)} cost=${res.cost_usd:.4f}"
+    )
+
+
+@app.command()
+def research(
+    query: str = typer.Argument(...),
+    project: str | None = typer.Option(None, "--project"),
+    model: str = typer.Option("anthropic/claude-3-haiku", "--model"),
+) -> None:
+    """Run one research cycle for `query` and write the brief to the inbox."""
+    from .model import OpenRouterClient
+    from .notifier import Notifier
+    from .research import run_research
+
+    with _hub_client_from_host() as hub:
+        notifier = Notifier(hub=hub, telegram=None)
+        res = run_research(
+            query=query,
+            hub=hub,
+            model_client=OpenRouterClient(),
+            notifier=notifier,
+            project_id=project,
+            model=model,
+        )
+    console.print(res.synthesis)
+    console.print(
+        f"\n[dim]sub_questions={len(res.sub_questions)}  hits={len(res.hits)}  cost=${res.cost_usd:.4f}[/dim]"
+    )
 
 
 # ----- session (tmux/screen) -----

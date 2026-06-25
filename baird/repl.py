@@ -1,4 +1,4 @@
-"""Multi-turn coding REPL for `baird code` — Phase 4b.
+"""Multi-turn coding REPL for `baird code` — Phase 4b + diff loop.
 
 Each user line is a turn:
   1. Append user message to the persistent project Session (one per project).
@@ -6,20 +6,21 @@ Each user line is a turn:
   3. Call the model with the recent message history + system prompt.
   4. Append assistant message; record cost on the action.
   5. Print the reply + per-turn cost/token footer.
+  6. If the reply contains fenced ```diff blocks, prompt for per-block approval.
 
 Special inputs start with `/`:
   /exit, /quit        — leave the REPL
   /context            — re-render the repo context block
   /reset              — start a fresh session (drops prior history)
   /cost               — show cumulative cost for this REPL invocation
-
-Diff approval / tool calling lives in a later slice — we deliberately keep
-this loop's contract small so the substrate is solid first.
+  /no-diff            — skip diff prompting for the rest of the session
 """
 
 from __future__ import annotations
 
+import re
 import sys
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,10 +28,20 @@ from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.syntax import Syntax
 
 from .context_loader import RepoContext, render_context
+from .diff_apply import DiffApplyError, apply_diff_to_repo
 from .memory_client import HubClient
 from .model import Completion, ModelError, OpenRouterClient
+
+
+_DIFF_BLOCK_RE = re.compile(r"```(?:diff|patch)\s*\n(.*?)```", re.DOTALL)
+
+
+def extract_diff_blocks(text: str) -> list[str]:
+    """Pull any ```diff / ```patch fenced blocks out of `text`."""
+    return [m.group(1) for m in _DIFF_BLOCK_RE.finditer(text or "")]
 
 
 HISTORY_TURN_CAP = 20  # last N messages sent to the model on each turn
@@ -51,6 +62,8 @@ class ReplConfig:
     max_tokens: int = 1024
     temperature: float = 0.2
     history_cap: int = HISTORY_TURN_CAP
+    project_root: Path | None = None  # required for diff_apply
+    diff_loop_enabled: bool = True
 
 
 def _system_prompt(rendered_context: str) -> str:
@@ -81,6 +94,8 @@ def run_repl(
     stats = ReplStats()
     rendered = render_context(repo_ctx)
     system = _system_prompt(rendered)
+    # Local switch — user can toggle off mid-session via /no-diff.
+    diff_loop_active = config.diff_loop_enabled
 
     session = hub.find_or_create_session_for_task(
         task_id=f"repl-{config.project_id}",
@@ -135,6 +150,10 @@ def run_repl(
                     f"tokens={stats.total_input_tokens}→{stats.total_output_tokens}[/dim]"
                 )
                 continue
+            if cmd in {"no-diff", "nodiff"}:
+                diff_loop_active = False
+                console.print("[yellow]diff prompts disabled for this session[/yellow]")
+                continue
             console.print(f"[red]unknown command:[/red] /{cmd}")
             continue
 
@@ -162,6 +181,14 @@ def run_repl(
         stats.total_cost_usd += completion.cost_usd
         stats.total_input_tokens += completion.usage.input_tokens
         stats.total_output_tokens += completion.usage.output_tokens
+
+        if diff_loop_active and config.project_root is not None:
+            _handle_diff_blocks(
+                completion.content,
+                console=console,
+                project_root=config.project_root,
+                input_fn=input_fn if iterator is None else _iter_input_fn(iterator),
+            )
 
     console.print(
         f"[dim]session={session['id'][:8]}  turns={stats.turns}  total=${stats.total_cost_usd:.4f}[/dim]"
@@ -212,3 +239,61 @@ def _one_turn(
         action.set_summary(first_line[:200])
 
     return completion
+
+
+def _iter_input_fn(iterator: Iterable[str]) -> Callable[[str], str]:
+    """Adapt an `inputs=` iterable so the diff prompt can read the next line.
+
+    Returns "" on exhaustion (treated as "no apply") — the prompt skips.
+    """
+    def _read(_: str) -> str:
+        try:
+            return next(iterator)  # type: ignore[arg-type]
+        except StopIteration:
+            return ""
+
+    return _read
+
+
+def _handle_diff_blocks(
+    content: str,
+    *,
+    console: Console,
+    project_root: Path,
+    input_fn: Callable[[str], str],
+) -> None:
+    """Find fenced diff blocks in `content` and prompt the user per block."""
+    blocks = extract_diff_blocks(content)
+    if not blocks:
+        return
+    for i, diff in enumerate(blocks, 1):
+        console.print(
+            Panel(
+                Syntax(diff, "diff", line_numbers=False, word_wrap=True),
+                title=f"proposed diff {i}/{len(blocks)}",
+                border_style="cyan",
+            )
+        )
+        try:
+            choice = input_fn("apply? [y/N/q]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if choice == "q":
+            return
+        if choice != "y":
+            console.print("[dim]skipped[/dim]")
+            continue
+        try:
+            result = apply_diff_to_repo(
+                repo=project_root,
+                diff_text=diff,
+                commit_message=f"baird: apply REPL-proposed diff {i}",
+                action_id=f"repl-{uuid.uuid4().hex[:8]}",
+            )
+        except DiffApplyError as e:
+            console.print(f"[red]apply failed:[/red] {e}")
+            continue
+        console.print(
+            f"[green]applied[/green] {result.commit_sha[:12]} "
+            f"({len(result.files_changed)} file(s))"
+        )
