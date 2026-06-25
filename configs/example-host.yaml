@@ -1,0 +1,32 @@
+# Example BAIRD per-host config.
+# Copy to ~/.baird/host.yaml on each satellite and adjust for that machine.
+
+host_id: workstation                       # short identifier for this machine
+
+hub_url: https://surface.taild8d801.ts.net  # BAIRD hub URL on the Tailnet
+auth_token: REPLACE_WITH_PER_HOST_TOKEN     # rotated whenever you want
+
+session_multiplexer: auto                  # auto | tmux | screen | none
+
+volumes:
+  - id: workstation:/data
+    mount: /data
+    shared: false                          # whether this volume is visible from other compute nodes
+  - id: workstation:/home
+    mount: /home
+    shared: false
+
+watch:
+  roots:
+    - /data/projects
+    - /home/ethan/code
+  deny:
+    - "**/.git/**"
+    - "**/.snakemake/**"
+    - "**/.nextflow/**"
+    - "**/__pycache__/**"
+    - "**/conda-envs/**"
+    - "**/.ipynb_checkpoints/**"
+    - "**/*.swp"
+    - "**/*.tmp"
+    - "**/tmp/**"
