@@ -103,7 +103,30 @@ class WatchdogDaemon:
             t.start()
         self._threads.extend([t1, t2])
 
+        if self.cfg.executor_listen:
+            t3 = threading.Thread(
+                target=self._executor_serve, name="executor", daemon=True
+            )
+            t3.start()
+            self._threads.append(t3)
+            log.info("executor listening on %s", self.cfg.executor_listen)
+        else:
+            log.info("executor_listen not set — coding-mode endpoints disabled")
+
         log.info("BAIRD daemon ready on host_id=%s", self.cfg.host_id)
+
+    def _executor_serve(self) -> None:
+        from .executor import create_executor_app
+        import uvicorn
+
+        host, _, port = (self.cfg.executor_listen or "").partition(":")
+        app = create_executor_app(self.cfg)
+        config = uvicorn.Config(app, host=host or "127.0.0.1", port=int(port or "8765"), log_level="info")
+        server = uvicorn.Server(config)
+        try:
+            server.run()
+        except Exception:
+            log.exception("executor server crashed")
 
     def stop(self) -> None:
         if self._stopping.is_set():

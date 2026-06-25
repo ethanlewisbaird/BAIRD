@@ -35,11 +35,13 @@ project_app = typer.Typer(help="Project management")
 task_app = typer.Typer(help="Background task management")
 hub_app = typer.Typer(help="Hub service")
 inbox_app = typer.Typer(help="Notification inbox", invoke_without_command=True)
+diff_app = typer.Typer(help="Diff review/apply")
 
 app.add_typer(project_app, name="project")
 app.add_typer(task_app, name="task")
 app.add_typer(hub_app, name="hub")
 app.add_typer(inbox_app, name="inbox")
+app.add_typer(diff_app, name="diff")
 
 console = Console()
 
@@ -83,12 +85,42 @@ def main(
 
 
 @app.command()
-def code(project: str | None = typer.Option(None, "--project", help="Project id (auto-detected if omitted)")) -> None:
-    """Interactive coding mode (not yet implemented)."""
-    console.print("[yellow]`baird code` is not yet implemented (Phase 3)[/yellow]")
-    if project:
-        console.print(f"requested project: {project}")
-    raise typer.Exit(1)
+def code(
+    show_context: bool = typer.Option(
+        False, "--show-context", help="Print the rendered repo context and exit"
+    ),
+    file: list[str] = typer.Option(
+        [], "--file", "-f", help="Extra files to include in the context block"
+    ),
+    budget: int = typer.Option(6000, "--budget", help="Approx token budget for the context block"),
+) -> None:
+    """Interactive coding mode.
+
+    Phase 3 ships the substrate: this command loads the repo context for the
+    current project. The actual LLM call lands in Phase 4 (OpenRouter). Until
+    then, `--show-context` is the useful flag.
+    """
+    from .context_loader import load_repo_context, render_context
+
+    root = Path.cwd()
+    if not (root / ".baird" / "project.yaml").exists():
+        console.print("[red]no .baird/project.yaml in cwd[/red] — run `baird project init`")
+        raise typer.Exit(1)
+
+    try:
+        with _hub_client_from_host() as hub:
+            ctx = load_repo_context(root, hub=hub)
+    except Exception:
+        ctx = load_repo_context(root, hub=None)
+
+    if show_context:
+        console.print(render_context(ctx, token_budget=budget))
+        return
+
+    console.print(
+        "[yellow]`baird code` REPL is not yet wired (Phase 4 will add the OpenRouter call).[/yellow]\n"
+        "Use `--show-context` to inspect the per-turn context block."
+    )
 
 
 @app.command()
@@ -241,6 +273,47 @@ def hub_serve(
 
     console.print(f"[green]starting BAIRD hub on {host}:{port}[/green]")
     uvicorn.run("baird.hub:app", host=host, port=port, log_level="info")
+
+
+# ----- diff -----
+
+
+@diff_app.command("apply")
+def diff_apply_cmd(
+    patch_file: Path = typer.Argument(..., exists=True, readable=True),
+    message: str = typer.Option(..., "--message", "-m"),
+    repo: Path = typer.Option(Path.cwd(), "--repo"),
+    action_id: str | None = typer.Option(None, "--action-id"),
+) -> None:
+    """Apply a unified diff file to the repo as a single BAIRD commit."""
+    import uuid
+
+    from .diff_apply import DiffApplyError, apply_diff_to_repo
+
+    try:
+        result = apply_diff_to_repo(
+            repo=repo,
+            diff_text=patch_file.read_text(),
+            commit_message=message,
+            action_id=action_id or f"cli-{uuid.uuid4().hex[:8]}",
+        )
+    except DiffApplyError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+    console.print(f"[green]applied[/green] {result.commit_sha[:12]} ({len(result.files_changed)} files)")
+
+
+@app.command()
+def undo(repo: Path = typer.Option(Path.cwd(), "--repo")) -> None:
+    """Revert the last BAIRD commit (uses `git revert`, never rewrites history)."""
+    from .diff_apply import DiffApplyError, undo_last_baird_commit
+
+    try:
+        new_sha = undo_last_baird_commit(repo)
+    except DiffApplyError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+    console.print(f"[green]reverted, new HEAD[/green] {new_sha[:12]}")
 
 
 # ----- daemon -----

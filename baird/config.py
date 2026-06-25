@@ -44,6 +44,9 @@ class HostConfig(BaseModel):
     session_multiplexer: str = "auto"  # auto | tmux | screen | none
     hub_url: str = "http://localhost:8000"
     auth_token: str | None = None
+    # If set, the daemon spawns the executor service on this address. Example:
+    # "0.0.0.0:8765" (Tailscale-only in practice — bind to the tailnet iface).
+    executor_listen: str | None = None
 
 
 class HubConfig(BaseModel):
