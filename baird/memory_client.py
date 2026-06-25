@@ -198,14 +198,23 @@ class HubClient:
         *,
         project_id: str | None = None,
         task_id: str | None = None,
+        started_after: dt.datetime | None = None,
+        unfinished_only: bool = False,
         limit: int = 50,
     ) -> list[dict]:
-        params: dict[str, Any] = {"limit": limit}
+        params: dict[str, Any] = {"limit": limit, "unfinished_only": unfinished_only}
         if project_id:
             params["project_id"] = project_id
         if task_id:
             params["task_id"] = task_id
+        if started_after is not None:
+            params["started_after"] = started_after.isoformat()
         r = self._client.get("/actions", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def stats(self) -> dict:
+        r = self._client.get("/stats")
         r.raise_for_status()
         return r.json()
 

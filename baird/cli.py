@@ -26,7 +26,7 @@ from .project_yaml import (
 )
 
 app = typer.Typer(
-    no_args_is_help=True,
+    no_args_is_help=False,  # we render mode hints + help from the callback ourselves
     add_completion=False,
     invoke_without_command=True,
     help="BAIRD — Bioinformatics AI Research Daemon",
@@ -37,6 +37,7 @@ hub_app = typer.Typer(help="Hub service")
 inbox_app = typer.Typer(help="Notification inbox", invoke_without_command=True)
 diff_app = typer.Typer(help="Diff review/apply")
 orchestrator_app = typer.Typer(help="Background-agent scheduler")
+registry_app = typer.Typer(help="Registry queries")
 
 app.add_typer(project_app, name="project")
 app.add_typer(task_app, name="task")
@@ -44,6 +45,7 @@ app.add_typer(hub_app, name="hub")
 app.add_typer(inbox_app, name="inbox")
 app.add_typer(diff_app, name="diff")
 app.add_typer(orchestrator_app, name="orchestrator")
+app.add_typer(registry_app, name="registry")
 
 console = Console()
 
@@ -82,8 +84,32 @@ def main(
         console.print(f"baird {__version__}")
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
+        _print_mode_hint()
+        console.print()
         console.print(ctx.get_help())
         raise typer.Exit()
+
+
+def _print_mode_hint() -> None:
+    """Phase 5 #1/#2: mode auto-detection (hint-only for now)."""
+    cwd = Path.cwd()
+    project_yaml = cwd / ".baird" / "project.yaml"
+    if project_yaml.exists():
+        try:
+            from .project_yaml import load_project_yaml
+            py = load_project_yaml(project_yaml)
+            console.print(f"[green]Detected project:[/green] {py.name} ({py.id}) — try [bold]`baird code`[/bold]")
+        except Exception:
+            console.print("[yellow]Detected .baird/project.yaml but failed to parse — try `baird project init --force` to reset[/yellow]")
+        return
+    if (cwd / ".git").exists():
+        console.print("[cyan]Plain git repo — run [bold]`baird project init <id>`[/bold] to enrol it[/cyan]")
+        return
+    notes_markers = {"papers", "notes", "research"}
+    if cwd.name in notes_markers or any((cwd / m).exists() for m in notes_markers):
+        console.print("[cyan]Looks like a notes/research dir — try [bold]`baird chat`[/bold] (no project context)[/cyan]")
+        return
+    console.print("[dim]No project here. Use [bold]`baird chat`[/bold] for free-form, or `baird project init` to start one.[/dim]")
 
 
 @app.command()
@@ -148,6 +174,143 @@ def chat() -> None:
     """Interactive chat mode, no repo context (not yet implemented)."""
     console.print("[yellow]`baird chat` is not yet implemented (Phase 3)[/yellow]")
     raise typer.Exit(1)
+
+
+# ----- status / logs / ps / registry -----
+
+
+@app.command()
+def status() -> None:
+    """One-shot dashboard: hub health, counts, budget, inbox, recent activity, tasks."""
+    from .config import load_hub_config
+    from .dashboard import gather, render
+    from .tasks import load_tasks_dir
+
+    hub_cfg = load_hub_config()
+    tasks = load_tasks_dir(_tasks_dir())
+    with _hub_client_from_host() as hub:
+        state = dashboard_gather(hub, hub_cfg, tasks)
+    render(state, console)
+
+
+# Indirection so tests can monkeypatch the gather call point.
+def dashboard_gather(hub, hub_cfg, tasks):  # noqa: ANN001
+    from .dashboard import gather
+    return gather(hub=hub, hub_cfg=hub_cfg, tasks=tasks)
+
+
+@app.command()
+def logs(
+    action_id: str = typer.Argument(...),
+    n_messages: int = typer.Option(50, "--messages", help="How many session messages to include"),
+) -> None:
+    """Show one Action plus any conversation messages from its task session."""
+    from rich.panel import Panel
+
+    with _hub_client_from_host() as hub:
+        try:
+            action = hub.get_action(action_id)
+        except Exception as e:
+            console.print(f"[red]action not found:[/red] {e}")
+            raise typer.Exit(1) from e
+
+        # Find a session keyed to the same task (best-effort — sessions/{id} index by task isn't a route yet).
+        msgs: list[dict] = []
+        # We can't query sessions by task_id without a dedicated route; punt for now.
+        # The action summary plus its metadata is the load-bearing output.
+
+    body = (
+        f"id:           {action['id']}\n"
+        f"project:      {action.get('project_id') or '-'}\n"
+        f"task:         {action.get('task_id') or '-'}\n"
+        f"host:         {action.get('host') or '-'}\n"
+        f"tool/cmd:     {action.get('command') or action.get('tool_name') or '?'}\n"
+        f"model:        {action.get('model_name') or '-'}\n"
+        f"started_at:   {action.get('started_at')}\n"
+        f"finished_at:  {action.get('finished_at') or '(running)'}\n"
+        f"exit_code:    {action.get('exit_code')}\n"
+        f"cost_usd:     ${action.get('cost_usd') or 0:.4f}\n"
+        f"tokens:       in={action.get('input_tokens') or 0} out={action.get('output_tokens') or 0}\n"
+    )
+    console.print(Panel(body, title=f"action {action['id'][:8]}", border_style="cyan"))
+    if action.get("summary"):
+        console.print(Panel(action["summary"], title="summary", border_style="green"))
+
+
+@app.command()
+def ps(limit: int = typer.Option(50, "--limit")) -> None:
+    """Actions currently running (no finished_at)."""
+    with _hub_client_from_host() as hub:
+        rows = hub.list_actions(unfinished_only=True, limit=limit)
+    if not rows:
+        console.print("[dim]nothing running[/dim]")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("started", style="dim")
+    table.add_column("id", style="dim")
+    table.add_column("project")
+    table.add_column("task")
+    table.add_column("host")
+    table.add_column("tool/cmd")
+    for a in rows:
+        table.add_row(
+            (a.get("started_at") or "")[:19],
+            a["id"][:8],
+            a.get("project_id") or "-",
+            a.get("task_id") or "-",
+            a.get("host") or "-",
+            (a.get("command") or a.get("tool_name") or "?")[:50],
+        )
+    console.print(table)
+
+
+# ----- registry -----
+
+
+@registry_app.command("actions")
+def registry_actions(
+    project_id: str | None = typer.Option(None, "--project"),
+    task_id: str | None = typer.Option(None, "--task"),
+    since_hours: int | None = typer.Option(None, "--since-hours", help="e.g. 24, 168"),
+    unfinished: bool = typer.Option(False, "--unfinished"),
+    limit: int = typer.Option(50, "--limit"),
+) -> None:
+    """List actions with filters."""
+    import datetime as _dt
+    started_after = None
+    if since_hours is not None:
+        started_after = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=since_hours)
+    with _hub_client_from_host() as hub:
+        rows = hub.list_actions(
+            project_id=project_id,
+            task_id=task_id,
+            started_after=started_after,
+            unfinished_only=unfinished,
+            limit=limit,
+        )
+    if not rows:
+        console.print("[dim]no actions[/dim]")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("started", style="dim")
+    table.add_column("id", style="dim")
+    table.add_column("project")
+    table.add_column("task")
+    table.add_column("status")
+    table.add_column("cost")
+    table.add_column("summary", overflow="ellipsis")
+    for a in rows:
+        status_ = "…" if a.get("finished_at") is None else f"exit {a.get('exit_code')}"
+        table.add_row(
+            (a.get("started_at") or "")[:19],
+            a["id"][:8],
+            a.get("project_id") or "-",
+            a.get("task_id") or "-",
+            status_,
+            f"${a.get('cost_usd') or 0:.4f}",
+            (a.get("summary") or "")[:80],
+        )
+    console.print(table)
 
 
 # ----- inbox -----
@@ -318,6 +481,34 @@ def task_list() -> None:
             "yes" if t.enabled else "no",
             t.runnable.model,
             f"${t.budget.max_cost_usd:.2f}" if t.budget.max_cost_usd else "-",
+        )
+    console.print(table)
+
+
+@task_app.command("history")
+def task_history(
+    task_id: str,
+    limit: int = typer.Option(20, "--limit"),
+) -> None:
+    """Show recent firings of one task."""
+    with _hub_client_from_host() as hub:
+        rows = hub.list_actions(task_id=task_id, limit=limit)
+    if not rows:
+        console.print(f"[dim]no firings recorded for {task_id}[/dim]")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("started", style="dim")
+    table.add_column("id", style="dim")
+    table.add_column("exit")
+    table.add_column("cost")
+    table.add_column("summary", overflow="ellipsis")
+    for a in rows:
+        table.add_row(
+            (a.get("started_at") or "")[:19],
+            a["id"][:8],
+            str(a.get("exit_code") if a.get("exit_code") is not None else "…"),
+            f"${a.get('cost_usd') or 0:.4f}",
+            (a.get("summary") or "")[:80],
         )
     console.print(table)
 

@@ -333,6 +333,10 @@ def register_routes(app: FastAPI) -> None:
             row.finished_at = payload.finished_at
         if payload.exit_code is not None:
             row.exit_code = payload.exit_code
+            # If the caller supplied an exit code but didn't pin a timestamp,
+            # mark the action finished now — natural "this is done" semantic.
+            if payload.finished_at is None and row.finished_at is None:
+                row.finished_at = _utcnow()
         if payload.summary is not None:
             row.summary = payload.summary
         if payload.cost_usd is not None:
@@ -349,6 +353,8 @@ def register_routes(app: FastAPI) -> None:
     def list_actions(
         project_id: Optional[str] = Query(None),
         task_id: Optional[str] = Query(None),
+        started_after: Optional[dt.datetime] = Query(None),
+        unfinished_only: bool = Query(False),
         limit: int = Query(50, le=500),
         s: Session = Depends(get_registry),
     ) -> list:
@@ -357,8 +363,40 @@ def register_routes(app: FastAPI) -> None:
             q = q.where(Action.project_id == project_id)
         if task_id is not None:
             q = q.where(Action.task_id == task_id)
+        if started_after is not None:
+            q = q.where(Action.started_at >= started_after)
+        if unfinished_only:
+            q = q.where(Action.finished_at.is_(None))
         q = q.order_by(desc(Action.started_at)).limit(limit)
         return [_action_out(r) for r in s.scalars(q).all()]
+
+    @app.get("/stats")
+    def stats(
+        reg: Session = Depends(get_registry),
+        mem: Session = Depends(get_memory),
+    ) -> dict:
+        from sqlalchemy import func
+
+        files_live = reg.scalar(
+            select(func.count(File.id)).where(File.deleted_at.is_(None))
+        ) or 0
+        actions_total = reg.scalar(select(func.count(Action.id))) or 0
+        actions_running = reg.scalar(
+            select(func.count(Action.id)).where(Action.finished_at.is_(None))
+        ) or 0
+        projects_total = mem.scalar(select(func.count(Project.id))) or 0
+        decisions_total = mem.scalar(select(func.count(Decision.id))) or 0
+        notifications_unresolved = mem.scalar(
+            select(func.count(Notification.id)).where(Notification.resolved_at.is_(None))
+        ) or 0
+        return {
+            "files_live": int(files_live),
+            "actions_total": int(actions_total),
+            "actions_running": int(actions_running),
+            "projects": int(projects_total),
+            "decisions": int(decisions_total),
+            "notifications_unresolved": int(notifications_unresolved),
+        }
 
     @app.get("/budgets/usage")
     def budgets_usage(
