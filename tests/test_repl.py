@@ -197,7 +197,7 @@ def test_repl_records_action_per_turn(tmp_path: Path, client: TestClient) -> Non
         repo_ctx=_ctx(tmp_path),
         hub=hub,
         model_client=_model("r1", "r2"),
-        config=ReplConfig(project_id="p4"),
+        config=ReplConfig(project_id="p4", model="anthropic/claude-3-haiku"),
         console=console,
         inputs=["a", "b", "/exit"],
     )
