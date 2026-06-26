@@ -135,6 +135,12 @@ def code(
         [], "--file", "-f", help="Extra files to include in the context block"
     ),
     budget: int = typer.Option(6000, "--budget", help="Approx token budget for the context block"),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        "-m",
+        help="OpenRouter model id. Falls back to $OPENROUTER_MODEL, then the REPL default.",
+    ),
 ) -> None:
     """Interactive coding mode.
 
@@ -163,15 +169,21 @@ def code(
     from .model import OpenRouterClient
     from .repl import ReplConfig, run_repl
 
+    import os as _os
+    resolved_model = model or _os.environ.get("OPENROUTER_MODEL")
+    repl_cfg_kwargs: dict[str, object] = {
+        "project_id": ctx.project.id,
+        "project_root": ctx.project_root,
+    }
+    if resolved_model:
+        repl_cfg_kwargs["model"] = resolved_model
+
     with _hub_client_from_host() as hub:
         run_repl(
             repo_ctx=ctx,
             hub=hub,
             model_client=OpenRouterClient(),
-            config=ReplConfig(
-                project_id=ctx.project.id,
-                project_root=ctx.project_root,
-            ),
+            config=ReplConfig(**repl_cfg_kwargs),
             console=console,
         )
 
