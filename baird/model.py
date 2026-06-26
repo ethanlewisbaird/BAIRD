@@ -32,6 +32,54 @@ DEFAULT_PRICING: dict[str, tuple[float, float]] = {
 }
 
 
+# Prefix priority list for building a curated "popular models" view from the
+# live OpenRouter catalog. Order = display order. First match wins per model.
+POPULAR_PREFIXES: tuple[str, ...] = (
+    "anthropic/claude-opus",
+    "anthropic/claude-sonnet",
+    "anthropic/claude-haiku",
+    "anthropic/claude-3.5-sonnet",
+    "anthropic/claude-3-haiku",
+    "openai/o",
+    "openai/gpt-4o",
+    "openai/gpt-4",
+    "google/gemini-2",
+    "google/gemini-1.5",
+    "meta-llama/llama-3",
+    "deepseek/",
+    "mistralai/",
+    "x-ai/grok",
+    "qwen/qwen",
+)
+
+
+def fetch_openrouter_catalog(timeout: float = 5.0) -> list[dict[str, Any]]:
+    """Fetch the public OpenRouter model catalog. No auth required."""
+    r = httpx.get("https://openrouter.ai/api/v1/models", timeout=timeout)
+    r.raise_for_status()
+    return r.json().get("data", [])
+
+
+def top_openrouter_models(
+    catalog: list[dict[str, Any]] | None = None, n: int = 20
+) -> list[dict[str, Any]]:
+    """Pick the top N popular models from the catalog (or fetched live)."""
+    cat = catalog if catalog is not None else fetch_openrouter_catalog()
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for prefix in POPULAR_PREFIXES:
+        for m in cat:
+            mid = m.get("id", "")
+            if mid in seen:
+                continue
+            if mid.startswith(prefix):
+                seen.add(mid)
+                out.append(m)
+                if len(out) >= n:
+                    return out
+    return out
+
+
 @dataclass
 class Usage:
     input_tokens: int = 0

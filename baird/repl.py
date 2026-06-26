@@ -98,6 +98,7 @@ def run_repl(
     system = _system_prompt(rendered)
     # Local switch — user can toggle off mid-session via /no-diff.
     diff_loop_active = config.diff_loop_enabled
+    model_picker_cache: list[str] = []
 
     session = hub.find_or_create_session_for_task(
         task_id=f"repl-{config.project_id}",
@@ -158,13 +159,40 @@ def run_repl(
                 continue
             if cmd == "model":
                 parts = line.split(maxsplit=1)
-                if len(parts) == 1:
+                arg = parts[1].strip() if len(parts) == 2 else ""
+                if not arg:
                     console.print(f"[dim]current model: {config.model}[/dim]")
+                    try:
+                        from .model import top_openrouter_models
+
+                        picks = top_openrouter_models(n=20)
+                        model_picker_cache = [m.get("id", "") for m in picks]
+                        for i, m in enumerate(picks, 1):
+                            console.print(
+                                f"  [cyan]{i:>2}.[/cyan] {m.get('id','')}"
+                            )
+                        console.print(
+                            "[dim]usage: /model <number> or /model <full-id>[/dim]"
+                        )
+                    except Exception as e:
+                        console.print(
+                            f"[yellow]could not fetch model list ({e}); "
+                            "you can still type /model <full-id>[/yellow]"
+                        )
                 else:
-                    new_model = parts[1].strip()
-                    if not new_model:
-                        console.print(f"[dim]current model: {config.model}[/dim]")
+                    new_model: str | None = None
+                    if arg.isdigit() and model_picker_cache:
+                        idx = int(arg)
+                        if 1 <= idx <= len(model_picker_cache):
+                            new_model = model_picker_cache[idx - 1]
+                        else:
+                            console.print(
+                                f"[red]index {idx} out of range[/red] "
+                                f"(1..{len(model_picker_cache)})"
+                            )
                     else:
+                        new_model = arg
+                    if new_model:
                         old = config.model
                         config.model = new_model
                         console.print(f"[yellow]model:[/yellow] {old} → {new_model}")

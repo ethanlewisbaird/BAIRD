@@ -149,6 +149,47 @@ def test_repl_model_command_changes_model(tmp_path: Path, client: TestClient) ->
     ]
 
 
+def test_repl_model_list_then_pick_by_index(
+    tmp_path: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/model` prints the catalog; `/model 2` picks #2 from it."""
+    import baird.model as model_mod
+
+    fake_catalog = [
+        {"id": "anthropic/claude-opus-4-7"},
+        {"id": "anthropic/claude-sonnet-4-6"},
+        {"id": "openai/gpt-4o"},
+    ]
+    monkeypatch.setattr(
+        model_mod, "top_openrouter_models", lambda n=20: fake_catalog
+    )
+
+    hub = _Hub(client)
+    console = Console(record=True, width=120)
+    seen_models: list[str] = []
+
+    def t(req):
+        seen_models.append(req["body"]["model"])
+        return {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0},
+        }
+
+    run_repl(
+        repo_ctx=_ctx(tmp_path),
+        hub=hub,
+        model_client=OpenRouterClient(transport=t),
+        config=ReplConfig(project_id="p5", model="anthropic/claude-3-haiku"),
+        console=console,
+        inputs=["/model", "/model 2", "go", "/exit"],
+    )
+
+    out = console.export_text()
+    assert "anthropic/claude-opus-4-7" in out
+    assert "anthropic/claude-sonnet-4-6" in out
+    assert seen_models == ["anthropic/claude-sonnet-4-6"]
+
+
 def test_repl_records_action_per_turn(tmp_path: Path, client: TestClient) -> None:
     hub = _Hub(client)
     console = Console(record=True, width=120)
