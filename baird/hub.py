@@ -97,6 +97,13 @@ def get_memory(request: Request) -> Iterator[Session]:
 
 
 def create_app(hub_cfg: Optional[HubConfig] = None) -> FastAPI:
+    # Load `<baird_home>/secrets.env` into the process environment so the proxy
+    # has its upstream API key even when started by systemd / supervisor /
+    # a non-interactive shell.
+    from . import paths as _paths
+
+    _paths.apply_secrets_env()
+
     cfg = hub_cfg or load_hub_config()
     registry_engine = create_registry_engine(cfg.registry_db)
     memory_engine = create_memory_engine(cfg.memory_db)

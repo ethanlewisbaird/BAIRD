@@ -90,6 +90,7 @@ def test_proxy_records_against_action(
 
 
 def test_proxy_requires_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BAIRD_HOME", str(tmp_path))   # isolate from real secrets.env
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     cfg = HubConfig(
         registry_db=str(tmp_path / "r.sqlite"),

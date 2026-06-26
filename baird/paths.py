@@ -34,3 +34,49 @@ def registry_db_path() -> Path:
 
 def memory_db_path() -> Path:
     return baird_home() / "memory.sqlite"
+
+
+def secrets_env_path() -> Path:
+    """`<baird_home>/secrets.env` — KEY=value, one per line. chmod 600 it.
+
+    Loaded into os.environ on hub startup so the hub picks up its credentials
+    regardless of which shell / systemd unit / cron starts it.
+    """
+    return baird_home() / "secrets.env"
+
+
+def load_secrets_env(path: Path | None = None) -> dict[str, str]:
+    """Parse a simple `KEY=value` file and return the dict. Missing file → {}.
+
+    Lines starting with `#` are comments. Quotes around the value are stripped
+    if matched. No shell expansion (no `$VAR`, no backticks) — keep it boring.
+    Existing env vars take precedence; we never overwrite what the user set
+    explicitly in the calling shell.
+    """
+    p = path or secrets_env_path()
+    if not p.exists():
+        return {}
+    out: dict[str, str] = {}
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1]
+        out[k] = v
+    return out
+
+
+def apply_secrets_env(path: Path | None = None) -> list[str]:
+    """Apply `load_secrets_env()` to `os.environ`. Returns the keys added."""
+    added: list[str] = []
+    for k, v in load_secrets_env(path).items():
+        if k not in os.environ:
+            os.environ[k] = v
+            added.append(k)
+    return added
