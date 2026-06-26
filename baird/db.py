@@ -204,15 +204,57 @@ def _make_engine(path: str):
     return create_engine(f"sqlite:///{p}", future=True)
 
 
+def _add_missing_columns(engine, metadata) -> None:
+    """Lightweight self-migration: for each declared column not present on the
+    existing table, ALTER TABLE ADD COLUMN. SQLite supports this for any
+    nullable column without a default, which is exactly what BAIRD declares.
+
+    We don't try to handle dropped or renamed columns — those are real
+    migrations and warrant a real tool. This handles the common case of
+    upgrading across phase boundaries.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    sqlalchemy_to_sqlite = {
+        "INTEGER": "INTEGER",
+        "BIGINT": "INTEGER",
+        "FLOAT": "REAL",
+        "REAL": "REAL",
+        "VARCHAR": "VARCHAR",
+        "TEXT": "TEXT",
+        "BOOLEAN": "BOOLEAN",
+        "JSON": "JSON",
+        "DATETIME": "DATETIME",
+    }
+    with engine.begin() as conn:
+        for table in metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            present = {c["name"] for c in inspector.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in present:
+                    continue
+                col_type = str(col.type).split("(")[0].upper()
+                sql_type = sqlalchemy_to_sqlite.get(col_type, col_type)
+                conn.execute(text(
+                    f'ALTER TABLE "{table.name}" ADD COLUMN '
+                    f'"{col.name}" {sql_type}'
+                ))
+
+
 def create_registry_engine(path: str):
     engine = _make_engine(path)
     RegistryBase.metadata.create_all(engine)
+    _add_missing_columns(engine, RegistryBase.metadata)
     return engine
 
 
 def create_memory_engine(path: str):
     engine = _make_engine(path)
     MemoryBase.metadata.create_all(engine)
+    _add_missing_columns(engine, MemoryBase.metadata)
     return engine
 
 
