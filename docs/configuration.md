@@ -1,23 +1,44 @@
 # Configuration
 
-Four files, two env vars.
+Five files, one env var (the others can live in `secrets.env`).
 
 | File | Owner | Purpose |
 |---|---|---|
-| `~/.baird/host.yaml` | every machine | volume map, watch roots, hub URL, auth token, multiplexer choice |
-| `~/.baird/config.yaml` | hub only | hub listen address, DB paths, daily budget ceilings |
+| `~/.baird/host.yaml` | every machine | volume map, watch roots, hub URL, auth tokens, multiplexer choice, model-routing toggle |
+| `~/.baird/config.yaml` | hub only | hub listen address, DB paths, daily budget ceilings, hub auth token, proxy upstream URL |
+| `~/.baird/secrets.env` | hub only (chmod 600) | `KEY=value` lines loaded into hub process env on startup |
 | `<repo>/.baird/project.yaml` | per project | identity, context, goals, decisions, rules, env block |
 | `~/.baird/tasks/<id>.yaml` | hub only | one file per scheduled/background task |
+| `~/.baird/satellites.json` | hub only (auto-written) | inventory of enrolled satellites + their assigned tunnel ports |
 
 Plus environment variables:
 
 | Var | Used by | Notes |
 |---|---|---|
 | `BAIRD_HOME` | everything | state directory. Default `~/.baird`. Set to run two installs side-by-side (dev vs. prod). |
-| `OPENROUTER_API_KEY` | hub (always); `baird code`/`task run`/`research`/`improve` only when not proxying through the hub | required to call the model. Lives on the hub when `use_hub_for_models: true` is set in satellites' host.yaml. |
-| `TELEGRAM_BOT_TOKEN` | orchestrator (Notifier) | optional; without it, inbox-only |
+| `OPENROUTER_API_KEY` | the hub process (proxy) and any client with `use_hub_for_models: false` | preferred location: `<baird_home>/secrets.env`, not your shell rc — that way systemd-supervised hubs see it too. |
+| `OPENROUTER_MODEL` | `baird code` | default model when `--model` is not passed. Falls back to the REPL default (`openrouter/owl-alpha`). |
+| `TELEGRAM_BOT_TOKEN` | orchestrator (Notifier) | optional; can live in `secrets.env`. Without it, inbox-only. |
 | `TELEGRAM_CHAT_ID` | orchestrator (Notifier) | required if `TELEGRAM_BOT_TOKEN` is set |
-| `TAVILY_API_KEY` | `baird research` (default backend) | optional; without it, research falls back gracefully |
+| `TAVILY_API_KEY` | `baird research` (default backend) | optional; can live in `secrets.env`. Without it, research falls back gracefully. |
+
+### `~/.baird/secrets.env`
+
+Plain `KEY=value` lines, one per line. Loaded into `os.environ` on hub startup
+for any key not already set (existing shell vars take precedence). Skip blanks
+and `#`-comment lines; quoted values get the matched outer quote stripped.
+
+```
+# ~/.baird/secrets.env  — chmod 600
+OPENROUTER_API_KEY=sk-or-...
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+TAVILY_API_KEY=tvly-...
+```
+
+This is the recommended place to put credentials. `chmod 600` it. Putting them
+in `~/.bashrc` only works for interactive shells, so a systemd-supervised hub
+or a `baird up` started by a non-interactive scheduler won't see them.
 
 ### Running two installs side-by-side
 

@@ -3,41 +3,47 @@
 ## Processes
 
 ```
-┌──────────────────────────────── HUB (Linux server) ─────────────────────────────────┐
-│                                                                                    │
-│   baird hub serve  ──►  FastAPI on :8000                                          │
-│     │                    routes: /files, /actions, /projects, /decisions,         │
-│     │                            /sessions, /messages, /notifications,            │
-│     │                            /budgets/usage, /stats, /recall                  │
-│     │                    backed by ~/.baird/registry.sqlite + memory.sqlite        │
-│     │                                                                              │
-│   baird orchestrator serve  ──►  scheduler (threaded) + notifier                  │
-│     │                              loads ~/.baird/tasks/*.yaml                     │
-│     │                              cron / interval / watch / reactive triggers     │
-│     │                                                                              │
-│   baird code  ──►  per-user REPL (transient process)                              │
-│   baird research / improve / snakemake / nextflow / status / ...                  │
-│                                                                                    │
-└──────────────────────────────────────┬─────────────────────────────────────────────┘
-                                       │  HTTP over Tailscale (memory_client.HubClient)
-        ┌──────────────────────────────┴──────────────────────────────┐
-        │                              │                              │
-┌───────▼────────────┐  ┌──────────────▼─────────────┐  ┌────────────▼────────────┐
-│  satellite A       │  │  satellite B               │  │  satellite C            │
-│  (workstation)     │  │  (HPC cluster login node)  │  │  (laptop)               │
-│                    │  │                            │  │                         │
-│  baird daemon      │  │  baird daemon              │  │  baird daemon (or not)  │
-│    └─ watchdog     │  │    └─ watchdog             │  │                         │
-│    └─ executor     │  │    └─ executor             │  │                         │
-│       (FastAPI     │  │       (Tailscale-only,     │  │                         │
-│        bearer-auth)│  │        bearer-auth)        │  │                         │
-└────────────────────┘  └────────────────────────────┘  └─────────────────────────┘
+┌──────────────────────────── HUB (Linux server) ────────────────────────────┐
+│                                                                            │
+│   baird hub serve  ──►  FastAPI on :8000  (bearer-auth, deny-by-default)  │
+│     │                    routes: /files, /actions, /projects, /decisions, │
+│     │                            /sessions, /messages, /notifications,    │
+│     │                            /budgets/usage, /stats, /recall,         │
+│     │                            /v1/proxy/chat/completions               │
+│     │                    backed by ~/.baird/registry.sqlite + memory.sqlite│
+│     │                    loads ~/.baird/secrets.env on startup            │
+│     │                                                                      │
+│   baird orchestrator serve  ──►  scheduler (threaded) + notifier          │
+│     │                              loads ~/.baird/tasks/*.yaml             │
+│     │                              cron / interval / watch / reactive      │
+│     │                                                                      │
+│   baird code  ──►  per-user REPL (transient; auto-starts hub if missing)  │
+│   baird research / improve / snakemake / nextflow / status / ...          │
+│                                                                            │
+└─────────────────────────────────┬──────────────────────────────────────────┘
+                                  │  HTTP over Tailscale OR SSH tunnels
+                                  │  (Bearer hub_auth_token + X-Baird-Action-Id)
+        ┌─────────────────────────┴─────────────────────────┐
+        │                         │                         │
+┌───────▼───────────┐  ┌──────────▼──────────┐  ┌──────────▼──────────┐
+│ satellite A       │  │ satellite B          │  │ satellite C          │
+│ (workstation)     │  │ (HPC login node)     │  │ (laptop)             │
+│                   │  │                      │  │                      │
+│ baird daemon      │  │ baird daemon         │  │ baird code (REPL)    │
+│  └─ watchdog      │  │  └─ watchdog         │  │                      │
+│  └─ executor      │  │  └─ executor         │  │  no OPENROUTER key   │
+│     (bearer-auth) │  │     (bearer-auth)    │  │  routes via hub      │
+│ use_hub_for_models│  │ use_hub_for_models   │  │  /v1/proxy/...       │
+│   = true          │  │   = true             │  │                      │
+└───────────────────┘  └──────────────────────┘  └──────────────────────┘
 ```
 
-- **Hub**: one always-on process. Owns the truth: two SQLite databases (registry + memory). FastAPI exposes everything.
+- **Hub**: one always-on process. Owns the truth: two SQLite databases (registry + memory) plus the OpenRouter credential. Bearer-token middleware gates every route except `/health`.
+- **Model proxy**: `/v1/proxy/chat/completions` lets satellites call OpenRouter without holding the key. Records cost + tokens against the caller's action via `X-Baird-Action-Id`.
 - **Daemon**: one per machine. Combines a watchdog (registers new/changed files) and the executor (`read_file` / `write_file` / `run_command` / `apply_diff` — bearer-token auth, path-scoped to declared volumes). Co-located so a hub-driven write and a watchdog event can't race into duplicate provenance rows.
 - **Orchestrator**: one process on the hub. Runs the task scheduler. Same code path as `baird code` — "background" means no human in the loop, not a different runtime.
-- **CLI commands** like `baird code`, `baird research`, `baird snakemake`: transient processes; they hit the hub via HTTP and call OpenRouter directly.
+- **CLI commands** like `baird code`, `baird research`, `baird snakemake`: transient processes; they hit the hub via HTTP and (when `use_hub_for_models: true`) call OpenRouter through the hub's proxy.
+- **`baird satellite enroll`**: from the hub, drives the full remote install + tunnel setup in one command. Writes `host.yaml` with the correct `hub_auth_token` automatically.
 
 ## Storage model
 
@@ -115,6 +121,21 @@ Telegram is best-effort — a network failure logs an error but never crashes th
 
 ## Security boundary
 
-The executor binds to the address in `host.yaml` → `executor_listen` and requires a bearer token on every call. In practice the user binds it to a Tailscale interface so only Tailnet peers can reach it. With no token configured, the executor refuses *every* call (deny-by-default).
+Three independent layers:
 
-The hub is similarly best-bound to Tailscale. No multi-user model — BAIRD assumes one user.
+- **Hub auth.** When `config.yaml` has `auth_token:` set, the hub middleware requires `Authorization: Bearer <token>` on every route except `/health`. Satellites send the matching token from `host.yaml` → `hub_auth_token`. With no token configured, the hub is open (single-user / single-machine convenience).
+- **Executor auth.** The satellite executor binds to `host.yaml` → `executor_listen` and requires a bearer token (`auth_token` on that satellite). With no token configured, it refuses *every* call (deny-by-default).
+- **Transport.** Two common deployments: Tailscale (bind to the tailnet iface; only tailnet peers can reach the hub or executor) or SSH-tunneled (hub stays on `127.0.0.1`; each satellite gets reverse-tunneled access via persistent `ssh -R`).
+
+`baird satellite enroll` defaults to the SSH-tunneled pattern, writes the matching `hub_auth_token` automatically, and stands up a `systemd --user` unit per satellite so the tunnel survives disconnects.
+
+No multi-user model — BAIRD assumes one user.
+
+## Central model proxy
+
+`POST /v1/proxy/chat/completions` on the hub forwards to OpenRouter using the **hub's** `OPENROUTER_API_KEY` (loaded from `<baird_home>/secrets.env` on startup). Satellites that set `use_hub_for_models: true` in `host.yaml` route their `baird code` / `task run` / `research` / `improve` calls through this endpoint:
+
+- Key lives on one machine (the hub).
+- One unified cost/token ledger: clients pass `X-Baird-Action-Id` and the proxy enriches the action row directly.
+- Provider swaps are one config change (`config.yaml` → `openrouter_url:`).
+- HPC satellites with restricted outbound networking still work — they only need to reach the hub.

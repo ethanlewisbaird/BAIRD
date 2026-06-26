@@ -247,33 +247,89 @@ curl 'localhost:8000/recall?query=harmony&project_id=scrna-2026&k=10' | jq
 
 Backed by SQL `LIKE` for now. The `/recall` shape is locked, so once the LanceDB swap lands you keep the same calls.
 
-## Notes on multi-machine
+## Adding a satellite machine
 
-On a satellite:
+### One command (the smooth path)
+
+Prereqs on the hub:
+
+- `~/.ssh/config` has an entry for the satellite hostname (uses your normal SSH config; no password prompts — keys preferred).
+- The hub's `~/.baird/config.yaml` has `auth_token:` set (any random string; `openssl rand -hex 32` is fine). The enrol command pulls it from there automatically.
+
+Then, from the hub:
 
 ```bash
-# install BAIRD
-git clone git@github.com:ethanlewisbaird/BAIRD.git && cd BAIRD
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
+baird satellite enroll <ssh-host>            # e.g. `baird satellite enroll hibu`
+```
 
-# point it at the hub
+What it does, in order:
+
+1. Picks an unused hub-side forward port (8766+).
+2. Writes `~/.config/systemd/user/baird-tunnel@.service` (if absent) and `~/.config/baird/tunnel-<ssh-host>.env`, then `systemctl --user enable --now baird-tunnel@<ssh-host>`. The tunnel is `ssh -R 8000:localhost:8000 -L <port>:localhost:8765`.
+3. SSHes out and runs a bootstrap script: `git clone` BAIRD into `~/code/BAIRD`, install via `uv` (provisions a managed Python 3.11), add a `baird` alias to `~/.bashrc`.
+4. Renders `host.yaml` on the satellite with the hub's `auth_token` already filled in as `hub_auth_token`, sets `use_hub_for_models: true` so the satellite routes OpenRouter calls through the hub's proxy, and `executor_listen: 127.0.0.1:8765`.
+5. Probes `baird project list` through the tunnel to prove the round-trip works.
+6. Records the satellite in `~/.baird/satellites.json`.
+
+Flags:
+
+```
+--host-id NAME              # BAIRD host_id; defaults to ssh-host
+--git-ref REF               # tag or branch to install (default: main)
+--port N                    # hub-side forward port (default: next free)
+--watch-root PATH           # watch root on the satellite (default: ~/projects)
+--no-use-hub-for-models     # let the satellite call OpenRouter directly with its own key
+```
+
+After enrolment, from the satellite:
+
+```bash
+baird project list                  # works (auth via tunnel)
+baird code                          # REPL; model calls go via hub proxy
+```
+
+No `OPENROUTER_API_KEY` on the satellite — it lives in `~/.baird/secrets.env` on the hub.
+
+### Manage satellites
+
+```bash
+baird satellite list                     # show enrolled satellites + tunnel status
+baird satellite remove <host-id>         # tear down hub-side tunnel (leaves remote install)
+systemctl --user status baird-tunnel@<ssh-host>
+journalctl --user -u baird-tunnel@<ssh-host> -f
+```
+
+### When the satellite can't SSH to the hub
+
+If the satellite can't initiate SSH to the hub (e.g. the hub is on Tailscale at `100.x.y.z` and the satellite doesn't have Tailscale), the tunnel direction is reversed: the **hub** SSHes out to the satellite, which the systemd-user unit does by default (`ssh -N -R 8000:localhost:8000 ...`). The hub needs SSH key auth set up *to* the satellite. The enrol command handles this for you.
+
+### Manual install (if you don't want the one-command flow)
+
+Only useful when the satellite blocks the hub's outbound SSH. Mirror the steps `baird satellite enroll` would have done by hand:
+
+```bash
+# on the satellite
+git clone https://github.com/ethanlewisbaird/BAIRD.git ~/code/BAIRD
+cd ~/code/BAIRD && uv venv --python 3.11 && uv pip install -e .
+
 mkdir -p ~/.baird
 cat > ~/.baird/host.yaml <<EOF
 host_id: $(hostname)
-hub_url: http://hub.tailnet:8000
-auth_token: <shared-secret>
-executor_listen: 0.0.0.0:8765     # bind to the Tailscale iface in practice
+hub_url: http://127.0.0.1:8000        # via SSH tunnel; change if reachable directly
+hub_auth_token: "<same as hub's config.yaml auth_token>"
+use_hub_for_models: true
+executor_listen: 127.0.0.1:8765
 volumes:
-  - id: $(hostname):/work
-    mount: /work
-    shared: true
+  - id: $(hostname):/home
+    mount: $HOME
+    shared: false
 watch:
-  roots: [/work/projects]
+  roots: [$HOME/projects]
   deny: ["**/.git/**"]
 EOF
 
-baird daemon
-```
+echo "alias baird='BAIRD_HOME=\$HOME/.baird \$HOME/code/BAIRD/.venv/bin/baird'" >> ~/.bashrc
 
-The hub's orchestrator (when wired) will call this satellite's executor over HTTP with the bearer token. Without a token configured, the executor refuses every call.
+# from the hub, stand up the tunnel manually (see `baird satellite enroll`'s systemd unit
+# in ~/.config/systemd/user/baird-tunnel@.service for the canonical ssh args).
+```

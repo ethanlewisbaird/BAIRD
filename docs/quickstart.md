@@ -64,18 +64,21 @@ REPL. Start it in a terminal when you want it; skip otherwise.
 
 On a satellite (different machine), set `hub_url: http://hub.tailnet:8000` and `auth_token: <shared-secret>` in `host.yaml`, then run `baird daemon` there. The hub stays on one machine.
 
-## 4. Set your model key
+## 4. Credentials — `~/.baird/secrets.env`
+
+Put your keys in a file the hub reads on startup. **Don't** export them in `~/.bashrc` — that only works in interactive shells, so a systemd-supervised or non-interactive `baird up` won't see them.
 
 ```bash
-export OPENROUTER_API_KEY=sk-or-...
+cat > ~/.baird/secrets.env <<'EOF'
+OPENROUTER_API_KEY=sk-or-...
+# TELEGRAM_BOT_TOKEN=...        # optional
+# TELEGRAM_CHAT_ID=...          # optional
+# TAVILY_API_KEY=tvly-...       # optional (baird research)
+EOF
+chmod 600 ~/.baird/secrets.env
 ```
 
-For Telegram push notifications (optional):
-
-```bash
-export TELEGRAM_BOT_TOKEN=...
-export TELEGRAM_CHAT_ID=...
-```
+The hub loads this file on startup. Existing shell vars take precedence; the file is a fallback.
 
 ## 5. Enrol a project
 
@@ -144,5 +147,19 @@ baird research "rapid scRNA-seq integration benchmarks 2026"
 baird improve --since-hours 24             # propose harness self-improvements
 baird snakemake path/to/Snakefile          # wrap a pipeline run with provenance
 ```
+
+## 10. Adding more machines
+
+When you want to use BAIRD from a workstation or HPC login node, set up auth on the hub first (`auth_token:` in `~/.baird/config.yaml`), make sure your `~/.ssh/config` on the hub can reach the satellite hostname, then from the hub:
+
+```bash
+baird satellite enroll <ssh-host>
+```
+
+One command. Installs BAIRD via uv on the satellite, sets up a persistent SSH tunnel via `systemd --user`, writes `host.yaml` with the matching auth token, and verifies the round-trip. The satellite's OpenRouter calls flow through the hub's proxy — the key never leaves the hub.
+
+See [workflows.md → "Adding a satellite machine"](workflows.md#adding-a-satellite-machine) for what each step does under the hood.
+
+---
 
 That's it. The rest is in [commands.md](commands.md) and [workflows.md](workflows.md).

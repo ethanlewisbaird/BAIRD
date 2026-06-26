@@ -43,8 +43,20 @@ REPL slash-commands inside `baird code`: `/exit`, `/quit`, `/context`, `/reset`,
 
 | Command | What it does |
 |---|---|
-| `baird hub serve [--host --port]` | Run the FastAPI hub |
+| `baird up` | Spawn the hub in the background if it isn't already running |
+| `baird stop` | Stop the supervised background hub |
+| `baird hub serve [--host --port]` | Run the FastAPI hub in the foreground (defaults from `config.yaml` `listen:`) |
 | `baird daemon` | Run the satellite-side daemon (watchdog + executor) |
+
+`baird code`, `baird project push`, `baird status` and friends call `baird up` automatically when the hub URL is local — you almost never need to start it by hand.
+
+## Satellites
+
+| Command | What it does |
+|---|---|
+| `baird satellite enroll <ssh-host> [--host-id --git-ref --port --watch-root --no-use-hub-for-models]` | One-shot: pick a hub-side port, write the systemd-user tunnel, SSH out, install BAIRD via uv, write `host.yaml` with the hub's auth token already filled in, verify round-trip |
+| `baird satellite list` | Enrolled satellites + live tunnel status |
+| `baird satellite remove <host-id>` | Tear down the hub-side tunnel for a satellite (leaves the remote install in place) |
 
 ## Observability
 
