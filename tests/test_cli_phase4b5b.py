@@ -96,8 +96,8 @@ def test_code_uses_repl(
 
     real_cls = model_mod.OpenRouterClient
 
-    def factory():
-        return real_cls(transport=fake_transport)
+    def factory(*, transport=None):
+        return real_cls(transport=transport or fake_transport)
 
     monkeypatch.setattr(model_mod, "OpenRouterClient", factory)
 

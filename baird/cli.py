@@ -166,7 +166,7 @@ def code(
         return
 
     # Multi-turn REPL (Phase 4b). Diff loop + tool calls come in a later slice.
-    from .model import OpenRouterClient
+    from .model import OpenRouterClient, make_hub_proxy_transport
     from .repl import ReplConfig, run_repl
 
     import os as _os
@@ -178,11 +178,25 @@ def code(
     if resolved_model:
         repl_cfg_kwargs["model"] = resolved_model
 
+    # Pick the model transport. If host.yaml says `use_hub_for_models: true`,
+    # route via the hub proxy (key lives only on the hub); otherwise direct.
+    from . import paths as _paths
+
+    transport = None
+    host_path = _paths.host_yaml_path()
+    if host_path.exists():
+        host_cfg = load_host_config(host_path)
+        if host_cfg.use_hub_for_models:
+            transport = make_hub_proxy_transport(
+                hub_url=host_cfg.hub_url,
+                auth_token=host_cfg.effective_hub_token(),
+            )
+
     with _hub_client_from_host() as hub:
         run_repl(
             repo_ctx=ctx,
             hub=hub,
-            model_client=OpenRouterClient(),
+            model_client=OpenRouterClient(transport=transport),
             config=ReplConfig(**repl_cfg_kwargs),
             console=console,
         )

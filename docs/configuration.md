@@ -14,7 +14,7 @@ Plus environment variables:
 | Var | Used by | Notes |
 |---|---|---|
 | `BAIRD_HOME` | everything | state directory. Default `~/.baird`. Set to run two installs side-by-side (dev vs. prod). |
-| `OPENROUTER_API_KEY` | `baird code`, `baird task run`, `baird research`, `baird improve`, orchestrator | required to call the model |
+| `OPENROUTER_API_KEY` | hub (always); `baird code`/`task run`/`research`/`improve` only when not proxying through the hub | required to call the model. Lives on the hub when `use_hub_for_models: true` is set in satellites' host.yaml. |
 | `TELEGRAM_BOT_TOKEN` | orchestrator (Notifier) | optional; without it, inbox-only |
 | `TELEGRAM_CHAT_ID` | orchestrator (Notifier) | required if `TELEGRAM_BOT_TOKEN` is set |
 | `TAVILY_API_KEY` | `baird research` (default backend) | optional; without it, research falls back gracefully |
@@ -44,7 +44,9 @@ Loaded by `baird daemon`, by every CLI command (to know which hub to talk to), a
 host_id: surface                       # any short string; appears in action rows
 hub_url: http://127.0.0.1:8000         # where the FastAPI hub lives
 session_multiplexer: auto              # auto | tmux | screen | none
-auth_token: null                       # bearer token the executor requires; null = deny remote calls
+auth_token: null                       # bearer the EXECUTOR on this host requires; null = deny inbound
+hub_auth_token: null                   # bearer this host SENDS to the hub. Falls back to auth_token.
+use_hub_for_models: false              # true on satellites: route OpenRouter calls through the hub proxy
 executor_listen: null                  # "0.0.0.0:8765" to expose the executor; null disables it
 
 volumes:                               # one entry per storage volume on this machine
@@ -94,6 +96,9 @@ memory_db: ~/.baird/memory.sqlite
 
 daily_total_usd: 5.0                   # global ceiling per 24h
 daily_per_task_default_usd: 0.5        # fallback when a task has no max_cost_usd
+
+auth_token: null                       # bearer required on every hub route except /health. null = open hub.
+openrouter_url: https://openrouter.ai/api/v1   # override for staging / corporate gateway
 ```
 
 Defaults are reasonable for a single user; you rarely need to edit this.

@@ -54,6 +54,36 @@ POPULAR_PREFIXES: tuple[str, ...] = (
 )
 
 
+def make_hub_proxy_transport(
+    *,
+    hub_url: str,
+    auth_token: str | None,
+    action_id: str | None = None,
+    timeout: float = 90.0,
+) -> "Transport":
+    """Build a Transport that routes OpenRouter calls through a BAIRD hub.
+
+    The hub holds the upstream API key, so the satellite doesn't need it.
+    `action_id` (optional) lets the hub attribute cost + tokens to a specific
+    open action without the caller having to do it client-side.
+    """
+
+    headers: dict[str, str] = {}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    if action_id:
+        headers["X-Baird-Action-Id"] = action_id
+    url = hub_url.rstrip("/") + "/v1/proxy/chat/completions"
+
+    def _transport(req: dict[str, Any]) -> dict[str, Any]:
+        # We ignore `req["path"]` — the proxy URL is fixed.
+        r = httpx.post(url, headers=headers, json=req["body"], timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+
+    return _transport
+
+
 def fetch_openrouter_catalog(timeout: float = 5.0) -> list[dict[str, Any]]:
     """Fetch the public OpenRouter model catalog. No auth required."""
     r = httpx.get("https://openrouter.ai/api/v1/models", timeout=timeout)
