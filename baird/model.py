@@ -36,6 +36,7 @@ DEFAULT_PRICING: dict[str, tuple[float, float]] = {
 # live OpenRouter catalog. Order = display order. First match wins per model.
 POPULAR_PREFIXES: tuple[str, ...] = (
     "anthropic/claude-opus",
+    "openrouter/",
     "anthropic/claude-sonnet",
     "anthropic/claude-haiku",
     "anthropic/claude-3.5-sonnet",
