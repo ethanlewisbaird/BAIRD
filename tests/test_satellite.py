@@ -105,7 +105,7 @@ def test_enroll_happy_path(
 
     # The host.yaml-writing ssh call should have received the rendered yaml.
     yaml_write = next(
-        (c for c in runner.calls if c[0][3:5] == ["hibu", "mkdir -p ~/.baird && cat > ~/.baird/host.yaml"]),
+        (c for c in runner.calls if c[0][3:5] == ["hibu", "mkdir -p $HOME/.baird && cat > $HOME/.baird/host.yaml"]),
         None,
     )
     assert yaml_write is not None

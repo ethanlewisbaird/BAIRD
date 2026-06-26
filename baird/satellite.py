@@ -154,9 +154,11 @@ class EnrollSpec:
     host_id: str
     git_url: str = "https://github.com/ethanlewisbaird/BAIRD.git"
     git_ref: str = "main"
-    remote_baird_dir: str = "~/code/BAIRD"
-    remote_baird_home: str = "~/.baird"
-    remote_watch_root: str = "~/projects"
+    # NB: $HOME, not ~ — the remote shell sees these inside quotes during
+    # bootstrap and bash does not expand tilde there.
+    remote_baird_dir: str = "$HOME/code/BAIRD"
+    remote_baird_home: str = "$HOME/.baird"
+    remote_watch_root: str = "$HOME/projects"
     use_hub_for_models: bool = True
     executor_listen: str = "127.0.0.1:8765"
     hub_url_from_satellite: str = "http://127.0.0.1:8000"
@@ -210,6 +212,13 @@ def _yaml_bool(value: bool) -> str:
 def _render_host_yaml(
     spec: EnrollSpec, *, remote_home: str
 ) -> str:
+    # Expand $HOME (and a leading ~) using the satellite's actual home dir,
+    # since pydantic doesn't shell-expand and we want concrete paths in the file.
+    def _expand(p: str) -> str:
+        if p.startswith("~"):
+            p = remote_home + p[1:]
+        return p.replace("$HOME", remote_home)
+
     return HOST_YAML_TEMPLATE.format(
         host_id=spec.host_id,
         hub_url=spec.hub_url_from_satellite,
@@ -217,7 +226,7 @@ def _render_host_yaml(
         use_hub_for_models=_yaml_bool(spec.use_hub_for_models),
         executor_listen=_yaml_str(spec.executor_listen),
         remote_home=remote_home,
-        watch_root=spec.remote_watch_root,
+        watch_root=_expand(spec.remote_watch_root),
     )
 
 
