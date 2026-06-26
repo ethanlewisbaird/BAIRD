@@ -583,14 +583,22 @@ def task_run(task_id: str) -> None:
 
 @hub_app.command("serve")
 def hub_serve(
-    host: str = typer.Option("127.0.0.1", "--host"),
-    port: int = typer.Option(8000, "--port"),
+    host: str | None = typer.Option(None, "--host", help="Override host from config.yaml"),
+    port: int | None = typer.Option(None, "--port", help="Override port from config.yaml"),
 ) -> None:
-    """Run the BAIRD hub FastAPI service."""
+    """Run the BAIRD hub FastAPI service.
+
+    Defaults to the `listen:` value in `<baird_home>/config.yaml`
+    (`127.0.0.1:8000` if no config file exists).
+    """
     import uvicorn
 
-    console.print(f"[green]starting BAIRD hub on {host}:{port}[/green]")
-    uvicorn.run("baird.hub:app", host=host, port=port, log_level="info")
+    cfg = load_hub_config()
+    default_host, default_port = cfg.listen.split(":")
+    bind_host = host or default_host
+    bind_port = port if port is not None else int(default_port)
+    console.print(f"[green]starting BAIRD hub on {bind_host}:{bind_port}[/green]")
+    uvicorn.run("baird.hub:app", host=bind_host, port=bind_port, log_level="info")
 
 
 # ----- diff -----
