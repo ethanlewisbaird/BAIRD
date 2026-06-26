@@ -104,6 +104,19 @@ def create_app(hub_cfg: Optional[HubConfig] = None) -> FastAPI:
     app = FastAPI(title="BAIRD hub", version="0.0.1")
     app.state.registry_session = make_session_factory(registry_engine)
     app.state.memory_session = make_session_factory(memory_engine)
+    app.state.hub_cfg = cfg
+
+    @app.middleware("http")
+    async def _require_bearer(request: Request, call_next):
+        token = cfg.auth_token
+        if token is None or request.url.path == "/health":
+            return await call_next(request)
+        presented = request.headers.get("authorization", "")
+        if presented != f"Bearer {token}":
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(status_code=401, content={"detail": "unauthorised"})
+        return await call_next(request)
 
     @app.get("/health")
     def health() -> dict:

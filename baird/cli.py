@@ -76,10 +76,10 @@ def _hub_client_from_host(auto_start: bool = True) -> HubClient:
     host_path = _paths.host_yaml_path()
     if host_path.exists():
         host_cfg = load_host_config(host_path)
-        return HubClient(host_cfg.hub_url, host_cfg.auth_token)
+        return HubClient(host_cfg.hub_url, host_cfg.effective_hub_token())
     hub_cfg = load_hub_config()
     host, port = hub_cfg.listen.split(":")
-    return HubClient(f"http://{host}:{port}")
+    return HubClient(f"http://{host}:{port}", hub_cfg.auth_token)
 
 
 def _project_yaml_path(root: Path | None = None) -> Path:

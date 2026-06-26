@@ -46,10 +46,22 @@ class HostConfig(BaseModel):
     watch: WatchSpec = Field(default_factory=WatchSpec)
     session_multiplexer: str = "auto"  # auto | tmux | screen | none
     hub_url: str = "http://localhost:8000"
+    # Inbound bearer the EXECUTOR on this host requires. Set on satellites the
+    # hub will drive; null means the executor denies all calls.
     auth_token: str | None = None
+    # Outbound bearer this host sends to the hub. If null, falls back to
+    # `auth_token` (compat). Set both on satellites that talk to a hub that
+    # requires auth.
+    hub_auth_token: str | None = None
+    # Route OpenRouter calls through the hub's proxy instead of calling
+    # OpenRouter directly. Lets a satellite work without holding the key.
+    use_hub_for_models: bool = False
     # If set, the daemon spawns the executor service on this address. Example:
     # "0.0.0.0:8765" (Tailscale-only in practice — bind to the tailnet iface).
     executor_listen: str | None = None
+
+    def effective_hub_token(self) -> str | None:
+        return self.hub_auth_token or self.auth_token
 
 
 class HubConfig(BaseModel):
@@ -60,6 +72,12 @@ class HubConfig(BaseModel):
     memory_db: str = Field(default_factory=lambda: str(paths.memory_db_path()))
     daily_total_usd: float = 5.0
     daily_per_task_default_usd: float = 0.5
+    # When set, every hub route except /health requires `Authorization: Bearer
+    # <auth_token>`. When null the hub is open (current behaviour).
+    auth_token: str | None = None
+    # Where the model proxy forwards to. Override for staging or a corporate
+    # gateway. The hub's OPENROUTER_API_KEY env var supplies the upstream key.
+    openrouter_url: str = "https://openrouter.ai/api/v1"
 
 
 # ----- Loading helpers -----
