@@ -204,6 +204,11 @@ def create_app(hub_cfg: Optional[HubConfig] = None) -> FastAPI:
 
     hub_memory.register_routes(app)
 
+    # ---- Model proxy (central key, central ledger) ----
+    from . import hub_proxy
+
+    hub_proxy.register_routes(app)
+
     return app
 
 
