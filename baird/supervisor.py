@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 
 from . import paths
-from .config import load_hub_config
+from .config import load_host_config, load_hub_config
 
 
 def _pid_file() -> Path:
@@ -32,11 +32,24 @@ def _log_file() -> Path:
 
 
 def _hub_url() -> str:
-    cfg = load_hub_config()
-    host, port = cfg.listen.split(":")
-    # Hub binds to listen-host; we probe via localhost — same machine by design.
-    probe_host = "127.0.0.1" if host in ("0.0.0.0", "127.0.0.1") else host
-    return f"http://{probe_host}:{port}"
+    """The URL we probe. host.yaml wins (it's the source of truth for where the
+    hub is); if missing, fall back to config.yaml's listen address."""
+    try:
+        host_cfg = load_host_config()
+        return host_cfg.hub_url.rstrip("/")
+    except Exception:
+        cfg = load_hub_config()
+        host, port = cfg.listen.split(":")
+        probe_host = "127.0.0.1" if host in ("0.0.0.0", "127.0.0.1") else host
+        return f"http://{probe_host}:{port}"
+
+
+def _hub_is_local() -> bool:
+    """True if the hub URL points at this machine — only then is auto-spawn safe."""
+    from urllib.parse import urlparse
+
+    host = urlparse(_hub_url()).hostname or ""
+    return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
 
 
 def is_hub_running(timeout: float = 0.5) -> bool:
@@ -48,9 +61,19 @@ def is_hub_running(timeout: float = 0.5) -> bool:
 
 
 def ensure_hub_running(*, wait_s: float = 8.0, quiet: bool = False) -> None:
-    """Block until the hub answers /health. Spawn one in the background if needed."""
+    """Block until the hub answers /health. Spawn one in the background if needed.
+
+    Only auto-spawns when the configured hub_url is local to this machine.
+    On a satellite (remote hub_url), fails fast with a clear error if the
+    hub isn't reachable — we shouldn't start a hub on the wrong machine.
+    """
     if is_hub_running():
         return
+    if not _hub_is_local():
+        raise RuntimeError(
+            f"hub at {_hub_url()} is not reachable — start it on the hub machine "
+            "(`baird up` there), or fix `hub_url` in this machine's host.yaml"
+        )
 
     paths.baird_home().mkdir(parents=True, exist_ok=True)
     log = open(_log_file(), "ab")
