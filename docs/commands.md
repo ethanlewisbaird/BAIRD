@@ -22,7 +22,7 @@ Bare `baird` (no args) prints a context-aware hint based on cwd, then help.
 | `baird diff apply <patch> -m <msg> [--repo --action-id]` | Apply a unified diff file as a BAIRD-trailered git commit |
 | `baird undo [--repo]` | Revert the last BAIRD commit via `git revert` |
 
-REPL slash-commands inside `baird code`: `/exit`, `/quit`, `/context`, `/reset`, `/cost`, `/no-diff`.
+REPL slash-commands inside `baird code`: `/exit`, `/quit`, `/context`, `/reset`, `/cost`, `/model [id]`, `/no-diff`, `/help`. `/model` with no argument prints the current model; `/model <id>` switches mid-session.
 
 ## Tasks
 

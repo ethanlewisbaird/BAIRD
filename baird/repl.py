@@ -13,7 +13,9 @@ Special inputs start with `/`:
   /context            — re-render the repo context block
   /reset              — start a fresh session (drops prior history)
   /cost               — show cumulative cost for this REPL invocation
+  /model [id]         — show or change the OpenRouter model mid-session
   /no-diff            — skip diff prompting for the rest of the session
+  /help               — list slash commands
 """
 
 from __future__ import annotations
@@ -105,7 +107,7 @@ def run_repl(
     console.print(
         Panel.fit(
             f"[green]baird code[/green]  project={config.project_id}  model={config.model}\n"
-            f"session={session['id'][:8]}  type /exit to quit, /context to dump context",
+            f"session={session['id'][:8]}  /help for commands, /exit to quit",
             border_style="green",
         )
     )
@@ -154,7 +156,26 @@ def run_repl(
                 diff_loop_active = False
                 console.print("[yellow]diff prompts disabled for this session[/yellow]")
                 continue
-            console.print(f"[red]unknown command:[/red] /{cmd}")
+            if cmd == "model":
+                parts = line.split(maxsplit=1)
+                if len(parts) == 1:
+                    console.print(f"[dim]current model: {config.model}[/dim]")
+                else:
+                    new_model = parts[1].strip()
+                    if not new_model:
+                        console.print(f"[dim]current model: {config.model}[/dim]")
+                    else:
+                        old = config.model
+                        config.model = new_model
+                        console.print(f"[yellow]model:[/yellow] {old} → {new_model}")
+                continue
+            if cmd == "help":
+                console.print(
+                    "[dim]/exit  /context  /reset  /cost  /model [id]  "
+                    "/no-diff[/dim]"
+                )
+                continue
+            console.print(f"[red]unknown command:[/red] /{cmd} (try /help)")
             continue
 
         try:

@@ -123,6 +123,32 @@ def test_repl_cost_command_does_not_call_model(tmp_path: Path, client: TestClien
     assert called["n"] == 0
 
 
+def test_repl_model_command_changes_model(tmp_path: Path, client: TestClient) -> None:
+    hub = _Hub(client)
+    console = Console(record=True, width=120)
+    seen_models: list[str] = []
+
+    def t(req):
+        seen_models.append(req["body"]["model"])
+        return {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0},
+        }
+
+    run_repl(
+        repo_ctx=_ctx(tmp_path),
+        hub=hub,
+        model_client=OpenRouterClient(transport=t),
+        config=ReplConfig(project_id="p4", model="anthropic/claude-3-haiku"),
+        console=console,
+        inputs=["one", "/model anthropic/claude-opus-4-7", "two", "/exit"],
+    )
+    assert seen_models == [
+        "anthropic/claude-3-haiku",
+        "anthropic/claude-opus-4-7",
+    ]
+
+
 def test_repl_records_action_per_turn(tmp_path: Path, client: TestClient) -> None:
     hub = _Hub(client)
     console = Console(record=True, width=120)
