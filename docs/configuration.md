@@ -13,10 +13,28 @@ Plus environment variables:
 
 | Var | Used by | Notes |
 |---|---|---|
+| `BAIRD_HOME` | everything | state directory. Default `~/.baird`. Set to run two installs side-by-side (dev vs. prod). |
 | `OPENROUTER_API_KEY` | `baird code`, `baird task run`, `baird research`, `baird improve`, orchestrator | required to call the model |
 | `TELEGRAM_BOT_TOKEN` | orchestrator (Notifier) | optional; without it, inbox-only |
 | `TELEGRAM_CHAT_ID` | orchestrator (Notifier) | required if `TELEGRAM_BOT_TOKEN` is set |
 | `TAVILY_API_KEY` | `baird research` (default backend) | optional; without it, research falls back gracefully |
+
+### Running two installs side-by-side
+
+Set `BAIRD_HOME` to redirect every state file (`host.yaml`, `config.yaml`, `tasks/`,
+`registry.sqlite`, `memory.sqlite`) to a different directory:
+
+```bash
+# Prod (your real harness): default ~/.baird
+alias baird='BAIRD_HOME=$HOME/.baird ~/code/BAIRD-prod/.venv/bin/baird'
+
+# Dev (for breaking things): separate state under ~/.baird-dev
+alias baird-dev='BAIRD_HOME=$HOME/.baird-dev ~/code/BAIRD-dev/.venv/bin/baird'
+```
+
+Use a different `listen:` port in the dev `config.yaml` so the two hubs can run
+at the same time. Your project memory lives in the SQLite files under
+`$BAIRD_HOME`, so the two installs share nothing by default.
 
 ## `~/.baird/host.yaml`
 

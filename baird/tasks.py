@@ -1,6 +1,6 @@
 """Task schema + loader — Phase 4 design (#1+#2).
 
-Tasks live in `~/.baird/tasks/<id>.yaml`. One file per task, single unified
+Tasks live in `<baird_home>/tasks/<id>.yaml`. One file per task, single unified
 format with three trigger types:
 
   - cron:   schedule field is a cron expression
@@ -103,7 +103,9 @@ def save_task(task: Task, path: Path) -> None:
 
 
 def load_tasks_dir(directory: Path | None = None) -> dict[str, Task]:
-    d = (directory or Path(TASKS_DIR_DEFAULT)).expanduser()
+    from . import paths
+
+    d = directory.expanduser() if directory is not None else paths.tasks_dir()
     if not d.exists():
         return {}
     out: dict[str, Task] = {}

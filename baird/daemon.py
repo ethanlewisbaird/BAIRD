@@ -2,7 +2,7 @@
 
 Phase 1 vertical slice — what's implemented here:
 
-- Reads `~/.baird/host.yaml` for volume map and watch config.
+- Reads `<baird_home>/host.yaml` for volume map and watch config.
 - Watches each `watch.roots` path recursively via `watchdog`.
 - Applies `watch.deny` gitignore-style patterns through `ScopeFilter`.
 - On every file create/modify event: computes the fast fingerprint and POSTs
@@ -276,7 +276,9 @@ def main() -> int:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    cfg_path = Path("~/.baird/host.yaml").expanduser()
+    from . import paths
+
+    cfg_path = paths.host_yaml_path()
     if not cfg_path.exists():
         log.error(
             "host config not found at %s — create one (see configs/example-host.yaml)",

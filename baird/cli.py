@@ -56,12 +56,15 @@ console = Console()
 
 
 def _hub_client_from_host() -> HubClient:
-    """Build a HubClient from ~/.baird/host.yaml (the satellite-side config).
+    """Build a HubClient from host.yaml (the satellite-side config).
 
-    Falls back to ~/.baird/config.yaml's `listen` if host.yaml is missing,
-    so this also works on the hub itself for local CLI use.
+    Falls back to config.yaml's `listen` if host.yaml is missing, so this also
+    works on the hub itself for local CLI use. Both files live under
+    `$BAIRD_HOME` (defaulting to `~/.baird`).
     """
-    host_path = Path("~/.baird/host.yaml").expanduser()
+    from . import paths as _paths
+
+    host_path = _paths.host_yaml_path()
     if host_path.exists():
         host_cfg = load_host_config(host_path)
         return HubClient(host_cfg.hub_url, host_cfg.auth_token)
@@ -478,8 +481,9 @@ def project_list() -> None:
 
 
 def _tasks_dir() -> Path:
-    from .tasks import TASKS_DIR_DEFAULT
-    return Path(TASKS_DIR_DEFAULT).expanduser()
+    from . import paths as _paths
+
+    return _paths.tasks_dir()
 
 
 @task_app.command("add")
@@ -785,8 +789,9 @@ def research(
 def _multiplexer():
     """Build a Multiplexer from host.yaml's session_multiplexer setting."""
     from .session_mux import select_backend
+    from . import paths as _paths
 
-    host_path = Path("~/.baird/host.yaml").expanduser()
+    host_path = _paths.host_yaml_path()
     pref = "auto"
     if host_path.exists():
         try:

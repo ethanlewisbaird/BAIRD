@@ -3,11 +3,12 @@
 BAIRD reads layered YAML config:
 
 - Built-in defaults shipped with the package.
-- User-wide overrides at `~/.baird/config.yaml`.
-- Per-host config at `~/.baird/host.yaml` (volume map, session multiplexer, scope filter).
+- User-wide overrides at `<baird_home>/config.yaml`.
+- Per-host config at `<baird_home>/host.yaml` (volume map, session multiplexer, scope filter).
 - Per-project overrides at `<project_root>/.baird/project.yaml`.
 
-Most-specific layer wins on a per-key basis.
+`baird_home` is `$BAIRD_HOME` if set, else `~/.baird`. Most-specific layer wins
+on a per-key basis.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field
+
+from . import paths
 
 
 # ----- Schemas (kept minimal in v0; fields will grow as phases land) -----
@@ -50,11 +53,11 @@ class HostConfig(BaseModel):
 
 
 class HubConfig(BaseModel):
-    """Hub-side config loaded from `~/.baird/config.yaml`."""
+    """Hub-side config loaded from `<baird_home>/config.yaml`."""
 
     listen: str = "127.0.0.1:8000"
-    registry_db: str = "~/.baird/registry.sqlite"
-    memory_db: str = "~/.baird/memory.sqlite"
+    registry_db: str = Field(default_factory=lambda: str(paths.registry_db_path()))
+    memory_db: str = Field(default_factory=lambda: str(paths.memory_db_path()))
     daily_total_usd: float = 5.0
     daily_per_task_default_usd: float = 0.5
 
@@ -71,10 +74,10 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_host_config(path: Path | None = None) -> HostConfig:
-    path = path or Path("~/.baird/host.yaml").expanduser()
+    path = path or paths.host_yaml_path()
     return HostConfig(**_load_yaml(path))
 
 
 def load_hub_config(path: Path | None = None) -> HubConfig:
-    path = path or Path("~/.baird/config.yaml").expanduser()
+    path = path or paths.hub_config_path()
     return HubConfig(**_load_yaml(path))
