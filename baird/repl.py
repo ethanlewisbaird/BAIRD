@@ -60,7 +60,7 @@ class ReplStats:
 @dataclass
 class ReplConfig:
     project_id: str
-    model: str = "anthropic/claude-3-haiku"
+    model: str = "openrouter/owl-alpha"
     max_tokens: int = 1024
     temperature: float = 0.2
     history_cap: int = HISTORY_TURN_CAP
