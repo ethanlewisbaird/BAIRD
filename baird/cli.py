@@ -39,6 +39,7 @@ diff_app = typer.Typer(help="Diff review/apply")
 orchestrator_app = typer.Typer(help="Background-agent scheduler")
 registry_app = typer.Typer(help="Registry queries")
 session_app = typer.Typer(help="Multiplexer (tmux/screen) sessions")
+satellite_app = typer.Typer(help="Enrol + manage satellite machines")
 
 app.add_typer(project_app, name="project")
 app.add_typer(task_app, name="task")
@@ -48,6 +49,7 @@ app.add_typer(diff_app, name="diff")
 app.add_typer(orchestrator_app, name="orchestrator")
 app.add_typer(registry_app, name="registry")
 app.add_typer(session_app, name="session")
+app.add_typer(satellite_app, name="satellite")
 
 console = Console()
 
@@ -916,6 +918,97 @@ def daemon() -> None:
     from .daemon import main as daemon_main
 
     raise typer.Exit(daemon_main())
+
+
+# ----- satellite -----
+
+
+@satellite_app.command("enroll")
+def satellite_enroll(
+    ssh_host: str = typer.Argument(..., help="SSH alias (uses ~/.ssh/config) or user@host"),
+    host_id: str | None = typer.Option(None, "--host-id", help="BAIRD host_id; defaults to ssh-host"),
+    git_ref: str = typer.Option("main", "--git-ref", help="Tag or branch to install on the satellite"),
+    port: int | None = typer.Option(None, "--port", help="Hub-side forward port; auto-picked if omitted"),
+    watch_root: str = typer.Option("~/projects", "--watch-root"),
+    use_hub_for_models: bool = typer.Option(
+        True, "--use-hub-for-models/--no-use-hub-for-models",
+        help="Route OpenRouter calls via the hub proxy (recommended).",
+    ),
+) -> None:
+    """One-shot satellite setup: SSH out, install BAIRD, write host.yaml,
+    stand up the SSH tunnel locally, verify the round-trip."""
+    from .satellite import enroll, enroll_spec_from_local
+
+    spec = enroll_spec_from_local(ssh_host, host_id=host_id, git_ref=git_ref)
+    spec.local_fwd_port = port
+    spec.remote_watch_root = watch_root
+    spec.use_hub_for_models = use_hub_for_models
+
+    console.print(f"[green]enrolling[/green] {ssh_host} (host_id={spec.host_id})…")
+    res = enroll(spec)
+    if res.health_ok:
+        console.print(
+            f"[green]ok[/green] {res.ssh_host}  port={res.local_fwd_port}  "
+            f"home={res.remote_home}"
+        )
+        console.print(
+            f"[dim]tunnel: systemctl --user status baird-tunnel@{ssh_host}[/dim]"
+        )
+    else:
+        console.print(f"[red]enrolment failed[/red]\n{res.detail}")
+        raise typer.Exit(1)
+
+
+@satellite_app.command("list")
+def satellite_list() -> None:
+    """List enrolled satellites and their tunnel status."""
+    from rich.table import Table
+
+    from .satellite import load_registry, tunnel_status
+
+    reg = load_registry()
+    if not reg:
+        console.print("[dim]no satellites enrolled[/dim]")
+        return
+    t = Table(title="satellites")
+    t.add_column("host_id"); t.add_column("ssh_host"); t.add_column("port")
+    t.add_column("hub-for-models"); t.add_column("tunnel")
+    for host_id, entry in sorted(reg.items()):
+        t.add_row(
+            host_id,
+            entry.get("ssh_host", ""),
+            str(entry.get("local_fwd_port", "")),
+            "yes" if entry.get("use_hub_for_models") else "no",
+            tunnel_status(entry.get("ssh_host", "")),
+        )
+    console.print(t)
+
+
+@satellite_app.command("remove")
+def satellite_remove(
+    host_id: str = typer.Argument(..., help="host_id from `baird satellite list`")
+) -> None:
+    """Tear down the hub-side tunnel for a satellite. Leaves the remote
+    install in place (you can re-enroll later or clean it manually)."""
+    from .satellite import (
+        TunnelSpec,
+        load_registry,
+        remove_tunnel,
+        save_registry,
+    )
+
+    reg = load_registry()
+    entry = reg.get(host_id)
+    if not entry:
+        console.print(f"[yellow]{host_id} not enrolled[/yellow]")
+        raise typer.Exit(1)
+    spec = TunnelSpec(
+        ssh_host=entry["ssh_host"], local_fwd_port=entry["local_fwd_port"]
+    )
+    remove_tunnel(spec)
+    del reg[host_id]
+    save_registry(reg)
+    console.print(f"[green]removed[/green] {host_id}")
 
 
 if __name__ == "__main__":
