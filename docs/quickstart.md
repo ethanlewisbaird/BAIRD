@@ -52,17 +52,15 @@ Hub-side defaults live under `~/.baird/config.yaml` (auto-created on first hub r
 
 See [configuration.md](configuration.md) for every field.
 
-## 3. Start the hub and daemon
+## 3. (You don't need to do anything here)
 
-Two terminals.
+The hub auto-starts in the background the first time you run a command that
+needs it (like `baird code` or `baird project push`). Logs go to
+`<baird_home>/hub.log`; PID to `<baird_home>/hub.pid`. Stop it with `baird
+stop`. Start it explicitly without entering the REPL with `baird up`.
 
-```bash
-# terminal A — the hub (FastAPI service backing the registry + memory)
-baird hub serve
-
-# terminal B — the satellite daemon (watchdog + executor)
-baird daemon
-```
+The filesystem watchdog (`baird daemon`) is optional and not needed for the
+REPL. Start it in a terminal when you want it; skip otherwise.
 
 On a satellite (different machine), set `hub_url: http://hub.tailnet:8000` and `auth_token: <shared-secret>` in `host.yaml`, then run `baird daemon` there. The hub stays on one machine.
 

@@ -55,14 +55,23 @@ console = Console()
 # ----- shared helpers -----
 
 
-def _hub_client_from_host() -> HubClient:
+def _hub_client_from_host(auto_start: bool = True) -> HubClient:
     """Build a HubClient from host.yaml (the satellite-side config).
 
     Falls back to config.yaml's `listen` if host.yaml is missing, so this also
     works on the hub itself for local CLI use. Both files live under
     `$BAIRD_HOME` (defaulting to `~/.baird`).
+
+    If `auto_start` (default), spawns the hub in the background when it isn't
+    already running. Pass `auto_start=False` for commands like `baird hub serve`
+    that *are* the hub.
     """
     from . import paths as _paths
+
+    if auto_start:
+        from .supervisor import ensure_hub_running
+
+        ensure_hub_running()
 
     host_path = _paths.host_yaml_path()
     if host_path.exists():
@@ -599,6 +608,32 @@ def hub_serve(
     bind_port = port if port is not None else int(default_port)
     console.print(f"[green]starting BAIRD hub on {bind_host}:{bind_port}[/green]")
     uvicorn.run("baird.hub:app", host=bind_host, port=bind_port, log_level="info")
+
+
+# ----- top-level supervisor commands -----
+
+
+@app.command("up")
+def up() -> None:
+    """Make sure the hub is running in the background."""
+    from .supervisor import ensure_hub_running, is_hub_running
+
+    if is_hub_running():
+        console.print("[green]hub is already running[/green]")
+        return
+    ensure_hub_running(quiet=True)
+    console.print("[green]hub started[/green]")
+
+
+@app.command("stop")
+def stop() -> None:
+    """Stop the background hub started by `baird up` (or any auto-start)."""
+    from .supervisor import stop_hub
+
+    if stop_hub():
+        console.print("[green]hub stopped[/green]")
+    else:
+        console.print("[yellow]no supervised hub to stop[/yellow]")
 
 
 # ----- diff -----
