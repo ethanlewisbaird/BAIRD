@@ -8,12 +8,30 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from baird.agent_tools import ToolEnv
 from baird.slash import (
     SlashContext,
     parse_kv_args,
     try_dispatch,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_satellite_registry(monkeypatch):
+    """Pin the satellite registry seen by /project add-location so tests
+    don't pick up the dev machine's real `~/.baird/satellites.json`. The
+    fixture is autouse so every test in this module sees the same set."""
+    fake = {
+        "hibu": {"local_fwd_port": 8766, "executor_auth_token": "tok"},
+        "gpu": {"local_fwd_port": 8767, "executor_auth_token": "tok"},
+        "GPU-wrkstn": {"local_fwd_port": 8768, "executor_auth_token": "tok"},
+    }
+    # `_resolve_satellite_host` does `from .satellite import load_registry`
+    # inside the function, so patching satellite.load_registry takes effect
+    # on each call.
+    monkeypatch.setattr("baird.satellite.load_registry", lambda: fake)
 
 
 class FakeExecutor:
@@ -134,6 +152,31 @@ def test_project_add_location_full_positional() -> None:
     hub.add_project_location.assert_called_once_with(
         "scrna", host="hibu", path="/data", role="data"
     )
+
+
+def test_project_add_location_rejects_unknown_host_with_suggestion() -> None:
+    """Issue 4: free-text host like 'GPU workstation' must be rejected
+    rather than silently stored and broken downstream. The error should
+    name the enrolled hosts AND suggest the closest match."""
+    ctx, hub, _ = _ctx(answers=[])
+    r = try_dispatch("project add-location scrna 'GPU workstation' /data", ctx)
+    assert r.handled and not r.ok
+    assert "unknown host" in r.output.lower()
+    assert "GPU-wrkstn" in r.output  # closest match suggested + listed
+    hub.add_project_location.assert_not_called()
+
+
+def test_project_add_location_canonicalises_host_casing() -> None:
+    """The stored value must match the registry's casing so downstream
+    lookups by host_id succeed; lookups themselves are case-insensitive."""
+    ctx, hub, _ = _ctx(answers=[])
+    hub.add_project_location.return_value = [
+        {"host": "GPU-wrkstn", "path": "/data", "role": None}
+    ]
+    r = try_dispatch("project add-location scrna gpu-WRKSTN /data", ctx)
+    assert r.handled and r.ok, r.output
+    args = hub.add_project_location.call_args.kwargs
+    assert args["host"] == "GPU-wrkstn"
 
 
 def test_project_add_location_validates_absolute_path() -> None:

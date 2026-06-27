@@ -170,6 +170,47 @@ def cmd_project_locations(parts: list[str], ctx: SlashContext) -> SlashResult:
 # ---- /project add-location -------------------------------------------
 
 
+def _resolve_satellite_host(host: str) -> tuple[str | None, str | None]:
+    """Match `host` against the satellite registry.
+
+    Returns `(canonical_host_id, None)` on a hit (case-insensitive match;
+    the stored value is the registry's casing). Returns `(None, error)`
+    when there's no match — the error message lists enrolled hosts and a
+    closest-match suggestion via difflib, so the user can correct the
+    typo without having to run `baird satellite list` themselves.
+
+    Lives in slash.py because the validation is a UX concern (turning a
+    bare ValueError from the hub into actionable text); other call sites
+    (e.g. add_project_location agent tool) can either re-use this or let
+    the hub raise raw.
+    """
+    import difflib
+
+    from .satellite import load_registry
+
+    try:
+        reg = load_registry()
+    except Exception as e:
+        # Fail open — better to let the hub call surface its own error than
+        # to block legitimate additions because the registry is unreadable.
+        return host, f"(warning: could not read satellite registry: {e})"
+    if not reg:
+        return None, "no satellites enrolled — run `/host add <ssh_host>` first"
+    by_lower = {hid.lower(): hid for hid in reg}
+    canonical = by_lower.get(host.lower())
+    if canonical is not None:
+        return canonical, None
+    suggestions = difflib.get_close_matches(host.lower(), list(by_lower), n=1, cutoff=0.4)
+    suggestion = (
+        f" did you mean `{by_lower[suggestions[0]]}`?" if suggestions else ""
+    )
+    enrolled = ", ".join(sorted(reg))
+    return None, (
+        f"unknown host {host!r}.{suggestion} "
+        f"Enrolled satellites: {enrolled}."
+    )
+
+
 def cmd_project_add_location(parts: list[str], ctx: SlashContext) -> SlashResult:
     pos, kv = parse_kv_args(parts)
     known = dict(kv)
@@ -185,6 +226,10 @@ def cmd_project_add_location(parts: list[str], ctx: SlashContext) -> SlashResult
         FormField("role", "role tag (data | compute | notebook | repo)", required=False),
     ]
     vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
+    canonical, err = _resolve_satellite_host(vals["host"])
+    if canonical is None:
+        return SlashResult(handled=True, ok=False, output=err or "unknown host")
+    vals["host"] = canonical
     rows = ctx.hub.add_project_location(
         vals["project_id"], host=vals["host"], path=vals["path"], role=vals.get("role")
     )
