@@ -319,7 +319,13 @@ def build_catalogue() -> dict[str, Tool]:
         ),
         "register_project": Tool(
             name="register_project",
-            description="Create or update a project record on the hub.",
+            description=(
+                "Create or update a project record on the hub. CALL THIS "
+                "when the user wants to set up a new project ('make a "
+                "project for the scRNA-seq work', 'register a project "
+                "called …'). Pair with add_project_location to attach "
+                "the (host, path) pairs the project spans."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -333,7 +339,18 @@ def build_catalogue() -> dict[str, Tool]:
         ),
         "add_project_location": Tool(
             name="add_project_location",
-            description="Attach a (host, path) location to a project.",
+            description=(
+                "Attach a (host, path) location to a project. CALL THIS "
+                "whenever the user describes where a project lives — "
+                "phrases like 'data is on the GPU workstation at /data/x', "
+                "'location = hibu /scratch/y', 'the laptop has the "
+                "notebooks under …', or 'add another location for this "
+                "project'. The host argument is a satellite host_id from "
+                "the enrolled-hosts registry (see `baird satellite list`); "
+                "the path is the absolute path on that satellite. Do NOT "
+                "instead propose a diff against project.yaml — locations "
+                "live on the hub and only this tool persists them."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -505,6 +522,36 @@ def dispatch(
     )
 
 
+def tool_catalogue_prompt(catalogue: dict[str, Tool] | None = None) -> str:
+    """Render the tool catalogue as a system-prompt block.
+
+    Embedded in the per-turn system prompt so the model sees what verbs are
+    available — without this the model defaults to proposing diffs against
+    project.yaml even when a dedicated tool (e.g. add_project_location)
+    exists. Each entry shows the name, the (full) description, and the
+    required + optional argument names.
+    """
+    cat = catalogue if catalogue is not None else build_catalogue()
+    lines: list[str] = [
+        "## Available hub tools",
+        "",
+        "Prefer calling a tool below over proposing a diff against project "
+        "memory. Tools persist state through the hub; diffs against "
+        "project.yaml are ignored for state the hub owns (locations, "
+        "decisions, environment installs, satellite host.yaml).",
+        "",
+    ]
+    for name in sorted(cat):
+        tool = cat[name]
+        params = tool.parameters.get("properties", {}) or {}
+        required = set(tool.parameters.get("required", []) or [])
+        req_args = ", ".join(f"{p}" for p in params if p in required)
+        opt_args = ", ".join(f"{p}" for p in params if p not in required)
+        sig = req_args + (f" [+ optional: {opt_args}]" if opt_args else "")
+        lines.append(f"- **{name}**({sig}): {tool.description}")
+    return "\n".join(lines)
+
+
 __all__ = [
     "Tool",
     "ToolEnv",
@@ -514,4 +561,5 @@ __all__ = [
     "build_catalogue",
     "classify_tool_call",
     "dispatch",
+    "tool_catalogue_prompt",
 ]
