@@ -304,8 +304,15 @@ def _one_turn(
         host=host_id,
         model_name=config.model,
     ) as action:
-        prior = hub.get_messages(session_id, limit=config.history_cap)
-        msgs = [{"role": m["role"], "content": m["content"]} for m in prior]
+        from .context_compressor import load_history_with_summary
+
+        msgs = load_history_with_summary(
+            hub,
+            session_id=session_id,
+            cap=config.history_cap,
+            model_client=model_client,
+            summary_model=config.model,
+        )
         hub.append_message(session_id, role="user", content=user_msg)
         msgs.append({"role": "user", "content": user_msg})
 

@@ -82,8 +82,15 @@ def run_task_once(
         task_id=task.id,
         model_name=runnable.model,
     ) as action:
-        prior = hub.get_messages(session["id"], limit=20)
-        prior_msgs = [{"role": m["role"], "content": m["content"]} for m in prior]
+        from .context_compressor import load_history_with_summary
+
+        prior_msgs = load_history_with_summary(
+            hub,
+            session_id=session["id"],
+            cap=20,
+            model_client=model_client,
+            summary_model=runnable.model,
+        )
         hub.append_message(session["id"], role="user", content=runnable.prompt)
         prior_msgs.append({"role": "user", "content": runnable.prompt})
 
