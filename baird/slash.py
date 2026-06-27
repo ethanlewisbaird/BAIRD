@@ -877,12 +877,18 @@ def try_dispatch(line: str, ctx: SlashContext) -> SlashResult | None:
     if not tokens:
         return None
     # Try two-word verbs first, then one-word.
+    from .tui import FormParseError
+
     for verb_len in (2, 1):
         if len(tokens) < verb_len:
             continue
         verb = " ".join(tokens[:verb_len])
         if verb in _COMMANDS:
-            return _COMMANDS[verb](tokens[verb_len:], ctx)
+            try:
+                return _COMMANDS[verb](tokens[verb_len:], ctx)
+            except FormParseError as e:
+                # Issue #2 fallback: a flag-looking value reached the form.
+                return SlashResult(handled=True, ok=False, output=str(e))
     return None
 
 

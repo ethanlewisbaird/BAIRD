@@ -469,3 +469,39 @@ def test_project_siblings_top_level_says_so() -> None:
 def test_unknown_command_returns_none() -> None:
     ctx, _hub, _exec = _ctx(answers=[])
     assert try_dispatch("nonsense", ctx) is None
+
+
+# ---- Issue #2 guard: flag-looking values are rejected -------------------
+
+
+def test_collect_form_values_rejects_flag_value_in_known() -> None:
+    """The collect_form_values fallback raises FormParseError when a
+    pre-supplied value starts with '--' — defends against any caller path
+    that bypasses the slash parser's check."""
+    from baird.tui import FormField, FormParseError, collect_form_values
+
+    fields = [FormField("name", "name", required=True)]
+    with pytest.raises(FormParseError) as ei:
+        collect_form_values(
+            fields, {"name": "--locations"}, input_fn=lambda _p: "x", console=None
+        )
+    assert "unparsed flag" in str(ei.value)
+
+
+def test_project_new_rejects_dangling_flag() -> None:
+    """`/project new p --locations` (no value) must error, not create."""
+    ctx, hub, _ = _ctx(answers=[])
+    r = try_dispatch("project new p --locations", ctx)
+    assert r.handled and not r.ok
+    assert "missing a value" in r.output
+    hub.upsert_project.assert_not_called()
+
+
+def test_project_new_rejects_flag_value() -> None:
+    """`/project new --name --locations h:/p` must error, not store
+    name='--locations'."""
+    ctx, hub, _ = _ctx(answers=[])
+    r = try_dispatch("project new p --name --locations h:/p", ctx)
+    assert r.handled and not r.ok
+    assert "flag-looking value" in r.output or "unparsed flag" in r.output
+    hub.upsert_project.assert_not_called()
