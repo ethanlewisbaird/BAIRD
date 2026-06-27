@@ -38,7 +38,7 @@ def _sched(client: TestClient, bus: EventBus | None = None) -> Scheduler:
         hub_cfg=HubConfig(daily_total_usd=10.0),
         tick_seconds=0.05,
         event_bus=bus or EventBus(),
-        watch_debounce_s=0.05,
+        watch_debounce_s=1.0,
     )
 
 

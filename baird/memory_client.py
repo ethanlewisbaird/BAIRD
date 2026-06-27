@@ -244,6 +244,25 @@ class HubClient:
         r.raise_for_status()
         return r.json()
 
+    # ---- Events ----
+
+    def emit_event(self, name: str, payload: dict[str, Any] | None = None) -> dict:
+        r = self._client.post(f"/events/{name}", json=payload or {})
+        r.raise_for_status()
+        return r.json()
+
+    def list_events(self, *, unconsumed_only: bool = False, limit: int = 50) -> list[dict]:
+        r = self._client.get(
+            "/events", params={"unconsumed_only": unconsumed_only, "limit": limit}
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def consume_event(self, event_id: str) -> dict:
+        r = self._client.post(f"/events/{event_id}/consume")
+        r.raise_for_status()
+        return r.json()
+
     @contextmanager
     def start_action(self, **fields: Any) -> Iterator["ActionHandle"]:
         """Context manager: opens an action row, lets the caller record I/O,

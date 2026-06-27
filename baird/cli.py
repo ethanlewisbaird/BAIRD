@@ -920,6 +920,43 @@ def daemon() -> None:
     raise typer.Exit(daemon_main())
 
 
+@app.command()
+def emit(
+    event: str = typer.Argument(..., help="Event name, e.g. pipeline.done"),
+    payload: str | None = typer.Option(None, "--payload", help="JSON object"),
+) -> None:
+    """Publish a reactive event. The scheduler picks it up on the next tick."""
+    import json as _json
+
+    data = _json.loads(payload) if payload else None
+    with _hub_client_from_host() as hub:
+        result = hub.emit_event(event, data)
+    console.print(f"[green]emitted[/green] {event}  id={result['id'][:8]}")
+
+
+files_app = typer.Typer(help="File lineage + registry helpers")
+app.add_typer(files_app, name="files")
+
+
+@files_app.command("lineage")
+def files_lineage(file_id: str = typer.Argument(...)) -> None:
+    """Show the chain of actions that produced (or modified) a file."""
+    from rich.table import Table
+
+    with _hub_client_from_host() as hub:
+        data = hub.file_lineage(file_id)
+    t = Table(title=f"lineage of {data['file_id']}")
+    t.add_column("action_id"); t.add_column("role"); t.add_column("tool"); t.add_column("command")
+    for a in data.get("actions", []):
+        t.add_row(
+            a["action_id"][:8],
+            a["role"],
+            a.get("tool_name", "") or "",
+            (a.get("command") or "")[:60],
+        )
+    console.print(t)
+
+
 # ----- satellite -----
 
 

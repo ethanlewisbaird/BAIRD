@@ -106,6 +106,7 @@ class Scheduler:
     _observers: list[Observer] = field(default_factory=list)
     _unsubs: list[Callable[[], None]] = field(default_factory=list)
     _last_event_fire: dict[str, dt.datetime] = field(default_factory=dict)
+    _event_fire_lock: threading.Lock = field(default_factory=threading.Lock)
 
     # --- public lifecycle ----------------------------------------------
 
@@ -168,10 +169,13 @@ class Scheduler:
         """Common path for watch + reactive firings: debounce, budget-check,
         spawn through the pool. Concurrency-group locks still apply."""
         now = _utcnow()
-        last = self._last_event_fire.get(task.id)
-        if last is not None and (now - last).total_seconds() < self.watch_debounce_s:
-            return
-        self._last_event_fire[task.id] = now
+        # Check-and-set under a lock so two concurrent publishes don't both
+        # win the debounce race.
+        with self._event_fire_lock:
+            last = self._last_event_fire.get(task.id)
+            if last is not None and (now - last).total_seconds() < self.watch_debounce_s:
+                return
+            self._last_event_fire[task.id] = now
 
         check = check_task_budget(hub=self.hub, task=task, hub_cfg=self.hub_cfg)
         if not check.ok:
@@ -220,12 +224,27 @@ class Scheduler:
 
     def _tick(self) -> None:
         now = _utcnow()
+        self._poll_hub_events()
         for entry in list(self._entries.values()):
             if entry.in_flight is not None and not entry.in_flight.done():
                 continue  # still running from last fire
             if entry.next_fire > now:
                 continue
             self._fire(entry, now)
+
+    def _poll_hub_events(self) -> None:
+        """Drain unconsumed events from the hub and republish onto the local
+        bus so reactive triggers fire. Best-effort: hub down → silent retry."""
+        try:
+            events = self.hub.list_events(unconsumed_only=True, limit=50)
+        except Exception:
+            return
+        for ev in events:
+            try:
+                self.event_bus.publish(ev["name"], ev.get("payload") or {})
+                self.hub.consume_event(ev["id"])
+            except Exception:
+                continue
 
     def _fire(self, entry: _ScheduleEntry, now: dt.datetime) -> None:
         task = entry.task

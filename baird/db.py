@@ -193,6 +193,19 @@ class Notification(MemoryBase):
     resolution: Mapped[str | None] = mapped_column(String, nullable=True)  # accept|reject|...
 
 
+class Event(MemoryBase):
+    """Cross-process reactive-trigger event. Producers POST to /events; the
+    scheduler polls and fires anything not yet consumed."""
+
+    __tablename__ = "events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String, index=True)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    consumed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
 # =========================================================================
 # Engine setup helpers
 # =========================================================================

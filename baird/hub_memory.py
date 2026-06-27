@@ -685,6 +685,55 @@ def register_routes(app: FastAPI) -> None:
         hits.sort(key=lambda h: h.created_at, reverse=True)
         return RecallResponse(hits=hits[:k])
 
+    _register_event_routes(app)
+
+
+def _register_event_routes(app: FastAPI) -> None:
+    from .db import Event
+
+    @app.post("/events/{name}")
+    def emit_event(
+        name: str,
+        payload: dict | None = None,
+        s: Session = Depends(get_memory),
+    ) -> dict:
+        row = Event(name=name, payload=payload)
+        s.add(row)
+        s.commit()
+        return {"id": row.id, "name": row.name, "created_at": row.created_at.isoformat()}
+
+    @app.get("/events")
+    def list_events(
+        unconsumed_only: bool = False,
+        limit: int = 50,
+        s: Session = Depends(get_memory),
+    ) -> list[dict]:
+        q = select(Event).order_by(Event.created_at.desc())
+        if unconsumed_only:
+            q = q.where(Event.consumed_at.is_(None))
+        rows = s.scalars(q.limit(limit)).all()
+        return [
+            {
+                "id": r.id,
+                "name": r.name,
+                "payload": r.payload,
+                "created_at": r.created_at.isoformat(),
+                "consumed_at": r.consumed_at.isoformat() if r.consumed_at else None,
+            }
+            for r in rows
+        ]
+
+    @app.post("/events/{event_id}/consume")
+    def mark_consumed(event_id: str, s: Session = Depends(get_memory)) -> dict:
+        row = s.get(Event, event_id)
+        if row is None:
+            raise HTTPException(404, "event not found")
+        if row.consumed_at is None:
+            from datetime import datetime, timezone
+            row.consumed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            s.commit()
+        return {"id": row.id, "consumed_at": row.consumed_at.isoformat()}
+
 
 def _notification_out(row: Notification) -> NotificationOut:
     return NotificationOut(
