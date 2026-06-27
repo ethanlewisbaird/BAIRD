@@ -89,6 +89,40 @@ def test_project_new_prompts_for_missing_id() -> None:
     assert hub.upsert_project.call_args.kwargs["id"] == "scrna"
 
 
+def test_project_new_inline_locations_get_added() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.upsert_project.return_value = {"id": "scrna"}
+    hub.add_project_location.return_value = []
+    r = try_dispatch(
+        "project new scrna locations=hibu:/data/scrna,gpu:/scratch/scrna", ctx
+    )
+    assert r.handled and r.ok, r.output
+    assert hub.add_project_location.call_count == 2
+    calls = [c.kwargs for c in hub.add_project_location.call_args_list]
+    hosts = [(c["host"], c["path"]) for c in calls]
+    assert hosts == [("hibu", "/data/scrna"), ("gpu", "/scratch/scrna")]
+    assert "2 location(s)" in r.output
+
+
+def test_project_new_skips_location_calls_when_empty() -> None:
+    # locations is optional → no prompt; nothing should be sent to the hub.
+    ctx, hub, _ = _ctx(answers=["scrna"])
+    hub.upsert_project.return_value = {"id": "scrna"}
+    r = try_dispatch("project new", ctx)
+    assert r.handled and r.ok, r.output
+    hub.add_project_location.assert_not_called()
+
+
+def test_project_new_skips_malformed_location_entries() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.upsert_project.return_value = {"id": "p"}
+    hub.add_project_location.return_value = []
+    # Mixed valid + malformed entries — malformed silently skipped.
+    r = try_dispatch("project new p locations=hibu:/data,no-colon,:/no-host,gpu:", ctx)
+    assert r.handled and r.ok, r.output
+    assert hub.add_project_location.call_count == 1
+
+
 # ---- /project add-location ------------------------------------------
 
 

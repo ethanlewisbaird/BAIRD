@@ -80,6 +80,27 @@ def _absolute_path(v: str) -> str | None:
 # ---- /project new -----------------------------------------------------
 
 
+def _parse_locations_spec(spec: str) -> list[tuple[str, str]]:
+    """Parse `host:path[,host:path...]` into a list of (host, path) pairs.
+
+    Empty string → empty list. Whitespace around each comma-separated entry is
+    trimmed. Entries without a colon, or with an empty host or path, are
+    skipped silently — `collect_form_values` doesn't have a hook to re-prompt
+    a single subfield, so we prefer succeed-with-warning over blocking project
+    creation on a partial typo.
+    """
+    out: list[tuple[str, str]] = []
+    for entry in (e.strip() for e in spec.split(",")):
+        if not entry or ":" not in entry:
+            continue
+        host, _, path = entry.partition(":")
+        host = host.strip()
+        path = path.strip()
+        if host and path:
+            out.append((host, path))
+    return out
+
+
 def cmd_project_new(parts: list[str], ctx: SlashContext) -> SlashResult:
     pos, kv = parse_kv_args(parts)
     known: dict[str, str] = dict(kv)
@@ -91,6 +112,11 @@ def cmd_project_new(parts: list[str], ctx: SlashContext) -> SlashResult:
         FormField("id", "project id (slug)", required=True),
         FormField("name", "human-readable name", required=False),
         FormField("github", "GitHub repo (owner/name)", required=False),
+        FormField(
+            "locations",
+            "locations (host:path[,host:path...]) — empty to add later",
+            required=False,
+        ),
     ]
     vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
     result = ctx.hub.upsert_project(
@@ -98,10 +124,27 @@ def cmd_project_new(parts: list[str], ctx: SlashContext) -> SlashResult:
         name=vals.get("name") or vals["id"],
         github=vals.get("github") or None,
     )
+    pid = result["id"]
+    added: list[tuple[str, str]] = []
+    for host, path in _parse_locations_spec(vals.get("locations", "")):
+        try:
+            ctx.hub.add_project_location(pid, host=host, path=path, role=None)
+            added.append((host, path))
+        except Exception as e:  # surfaced to user; project row already exists
+            return SlashResult(
+                handled=True,
+                ok=False,
+                output=(
+                    f"created project {pid}, but failed to add location "
+                    f"{host}:{path}: {e}"
+                ),
+                switch_to_project=pid,
+            )
+    extra = f" with {len(added)} location(s)" if added else ""
     return SlashResult(
         handled=True,
-        output=f"created project {result['id']}",
-        switch_to_project=result["id"],
+        output=f"created project {pid}{extra}",
+        switch_to_project=pid,
     )
 
 
