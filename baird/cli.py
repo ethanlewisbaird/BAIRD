@@ -699,6 +699,46 @@ def hub_serve(
     uvicorn.run("baird.hub:app", host=bind_host, port=bind_port, log_level="info")
 
 
+@hub_app.command("install")
+def hub_install(
+    system: bool = typer.Option(
+        False,
+        "--system",
+        help="Install system-wide (writes /etc/systemd/system, needs sudo). "
+        "Default is --user (no sudo; needs `loginctl enable-linger` to survive logout).",
+    ),
+) -> None:
+    """Install systemd units so the hub + local daemon survive reboots.
+
+    Mirrors what `baird up` does for the running shell, but persistent.
+    Writes two units (`baird-hub.service`, `baird-daemon.service`), reloads
+    systemd, and enables + starts both.
+    """
+    from .hub_install import InstallSpec, install
+
+    spec = InstallSpec(scope="system" if system else "user")
+    units = install(spec)
+    scope_label = "system-wide" if system else "user-scope"
+    console.print(f"[green]installed {scope_label}: {', '.join(units)}[/green]")
+    if not system:
+        console.print(
+            "[yellow]tip:[/yellow] services stop at logout unless you run "
+            "`sudo loginctl enable-linger $USER` once (one-time)."
+        )
+
+
+@hub_app.command("uninstall")
+def hub_uninstall(
+    system: bool = typer.Option(False, "--system", help="Remove the system-wide install"),
+) -> None:
+    """Disable + remove the installed systemd units (idempotent)."""
+    from .hub_install import InstallSpec, uninstall
+
+    spec = InstallSpec(scope="system" if system else "user")
+    uninstall(spec)
+    console.print("[green]uninstalled[/green]")
+
+
 # ----- top-level supervisor commands -----
 
 

@@ -92,7 +92,14 @@ Then start the long-lived scheduler:
 baird orchestrator serve
 ```
 
-A bare-bones systemd unit (Linux):
+Easiest: `baird hub install` writes systemd units for the hub and the local
+watchdog daemon and `enable --now`s them. Defaults to user-scope (no sudo;
+add `--system` for a dedicated always-on box). Undo with `baird hub
+uninstall`. Credentials still come from `<baird_home>/secrets.env` — the
+units don't carry `Environment=` lines for keys.
+
+If you want to roll your own (e.g. for the orchestrator process, which
+isn't covered by `baird hub install` yet):
 
 ```ini
 # /etc/systemd/system/baird-orchestrator.service
@@ -103,17 +110,12 @@ After=network.target
 [Service]
 Type=simple
 User=ethan
-Environment=OPENROUTER_API_KEY=sk-or-...
-Environment=TELEGRAM_BOT_TOKEN=...
-Environment=TELEGRAM_CHAT_ID=...
 ExecStart=/home/ethan/BAIRD/.venv/bin/baird orchestrator serve
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 ```
-
-Same shape for `baird hub serve` and `baird daemon`.
 
 ## File-watched task
 

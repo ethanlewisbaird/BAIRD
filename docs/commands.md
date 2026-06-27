@@ -46,6 +46,8 @@ REPL slash-commands inside `baird code`: `/exit`, `/quit`, `/context`, `/reset`,
 | `baird up` | Spawn the hub in the background if it isn't already running |
 | `baird stop` | Stop the supervised background hub |
 | `baird hub serve [--host --port]` | Run the FastAPI hub in the foreground (defaults from `config.yaml` `listen:`) |
+| `baird hub install [--system]` | Write + enable systemd units for the hub + local daemon (user-scope by default; `--system` for always-on server) |
+| `baird hub uninstall [--system]` | Disable + remove the installed systemd units |
 | `baird daemon` | Run the satellite-side daemon (watchdog + executor) |
 
 `baird code`, `baird project push`, `baird status` and friends call `baird up` automatically when the hub URL is local — you almost never need to start it by hand.

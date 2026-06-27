@@ -62,6 +62,13 @@ stop`. Start it explicitly without entering the REPL with `baird up`.
 The filesystem watchdog (`baird daemon`) is optional and not needed for the
 REPL. Start it in a terminal when you want it; skip otherwise.
 
+**Always-on:** if you want the hub + daemon to survive reboots and crashes,
+run `baird hub install` once. That writes two systemd units
+(`baird-hub.service`, `baird-daemon.service`) and `enable --now`s them.
+Default is user-scope (no sudo); pass `--system` for a dedicated server
+(needs sudo, writes to `/etc/systemd/system`). Undo with `baird hub
+uninstall`.
+
 On a satellite (different machine), set `hub_url: http://hub.tailnet:8000` and `auth_token: <shared-secret>` in `host.yaml`, then run `baird daemon` there. The hub stays on one machine.
 
 ## 4. Credentials — `~/.baird/secrets.env`
