@@ -46,6 +46,15 @@ class DataAlias(BaseModel):
     path: str
 
 
+class PolicyOverrideSpec(BaseModel):
+    """One entry in `project.yaml` → `permissions:`. Matches a command
+    pattern + assigns it a tier."""
+
+    command_regex: str
+    tier: str  # "safe" | "project" | "destructive"
+    reason: str | None = None
+
+
 class ProjectYaml(BaseModel):
     id: str
     name: str
@@ -56,6 +65,8 @@ class ProjectYaml(BaseModel):
     state: dict[str, Any] = Field(default_factory=dict)
     data_aliases: list[DataAlias] = Field(default_factory=list)
     rules: list[Rule] = Field(default_factory=list)
+    env: dict[str, Any] = Field(default_factory=dict)
+    permissions: list[PolicyOverrideSpec] = Field(default_factory=list)
 
 
 def load_project_yaml(path: Path) -> ProjectYaml:
