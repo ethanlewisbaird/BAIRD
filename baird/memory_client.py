@@ -263,6 +263,42 @@ class HubClient:
         r.raise_for_status()
         return r.json()
 
+    # ---- Recall promotion ----
+
+    def flag_action(
+        self, *, action_id: str, text: str, project_id: str | None = None
+    ) -> dict | None:
+        """Promote a tier-3 fragment for this action. Returns None when the
+        hub's recall index isn't configured."""
+        r = self._client.post(
+            "/recall/flag",
+            json={"action_id": action_id, "text": text, "project_id": project_id},
+        )
+        r.raise_for_status()
+        body = r.json()
+        return body if body.get("id") else None
+
+    def resolve_pair(
+        self,
+        *,
+        error_action_id: str,
+        fix_action_id: str,
+        text: str,
+        project_id: str | None = None,
+    ) -> dict | None:
+        r = self._client.post(
+            "/recall/resolve",
+            json={
+                "error_action_id": error_action_id,
+                "fix_action_id": fix_action_id,
+                "text": text,
+                "project_id": project_id,
+            },
+        )
+        r.raise_for_status()
+        body = r.json()
+        return body if body.get("id") else None
+
     @contextmanager
     def start_action(self, **fields: Any) -> Iterator["ActionHandle"]:
         """Context manager: opens an action row, lets the caller record I/O,

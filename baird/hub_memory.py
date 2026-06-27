@@ -269,6 +269,10 @@ def register_routes(app: FastAPI) -> None:
         s.add(row)
         s.commit()
         s.refresh(row)
+        _recall_upsert(
+            app, source="decision",
+            source_id=row.id, project_id=row.project_id, text=row.text,
+        )
         return DecisionOut(
             id=row.id,
             project_id=row.project_id,
@@ -347,6 +351,11 @@ def register_routes(app: FastAPI) -> None:
             row.output_tokens = payload.output_tokens
         s.commit()
         s.refresh(row)
+        if row.summary:
+            _recall_upsert(
+                app, source="action",
+                source_id=row.id, project_id=row.project_id, text=row.summary,
+            )
         return _action_out(row)
 
     @app.get("/actions", response_model=list[ActionOut])
@@ -589,6 +598,12 @@ def register_routes(app: FastAPI) -> None:
         s.add(row)
         s.commit()
         s.refresh(row)
+        text = f"{row.title}\n{row.body or ''}".strip()
+        if text:
+            _recall_upsert(
+                app, source="notification",
+                source_id=row.id, project_id=row.project_id, text=text,
+            )
         return _notification_out(row)
 
     @app.get("/notifications", response_model=list[NotificationOut])
@@ -684,10 +699,122 @@ def register_routes(app: FastAPI) -> None:
                     )
                 )
 
+        # Hybrid: merge vector hits on top of SQL hits, dedup by (source, id),
+        # then return top-k by (vector score where available, else recency).
+        if getattr(app.state, "recall_table", None) is not None:
+            from . import recall_index
+
+            # Map the public API's source names → the LanceDB source labels we
+            # store under. "action_summary" → "action" (we also stamp "flag"
+            # and "resolve" rows with the source_id of an action; treat both
+            # as action hits).
+            lance_sources: list[str] | None = None
+            if wanted:
+                mapped: set[str] = set()
+                for w in wanted:
+                    if w == "action_summary":
+                        mapped.update({"action", "flag", "resolve"})
+                    else:
+                        mapped.add(w)
+                lance_sources = sorted(mapped)
+            vec_rows = recall_index.search(
+                app.state.recall_table,
+                query=query,
+                k=k * 2,  # over-fetch; we'll dedup + clip below
+                project_id=project_id,
+                sources=lance_sources,
+            )
+            seen = {(h.source, h.id) for h in hits}
+            for r in vec_rows:
+                # LanceDB returns the source-table row fields plus `_distance`.
+                src = r.get("source", "")
+                sid = r.get("source_id", "")
+                # Map LanceDB sources back to the /recall API's source labels.
+                api_src = {
+                    "action": "action_summary",
+                    "decision": "decision",
+                    "notification": "notification",
+                    "message": "message",
+                    "flag": "action_summary",
+                    "resolve": "action_summary",
+                }.get(src, src)
+                if (api_src, sid) in seen:
+                    continue
+                seen.add((api_src, sid))
+                created = r.get("created_at")
+                hits.append(
+                    RecallHit(
+                        source=api_src,
+                        id=sid,
+                        project_id=r.get("project_id") or None,
+                        text=r.get("text", ""),
+                        created_at=created if isinstance(created, dt.datetime) else _utcnow(),
+                    )
+                )
+
         hits.sort(key=lambda h: h.created_at, reverse=True)
         return RecallResponse(hits=hits[:k])
 
+    @app.post("/recall/flag")
+    def recall_flag(payload: dict) -> dict:
+        """Promote an action snippet to tier-3 in the recall index."""
+        table = getattr(app.state, "recall_table", None)
+        if table is None:
+            return {"id": None, "reason": "recall not configured"}
+        from . import recall_index
+
+        fid = recall_index.promote_action(
+            table,
+            action_id=payload.get("action_id", ""),
+            text=payload.get("text", ""),
+            project_id=payload.get("project_id"),
+            kind="flag",
+            metadata=payload.get("metadata"),
+        )
+        return {"id": fid}
+
+    @app.post("/recall/resolve")
+    def recall_resolve(payload: dict) -> dict:
+        """Promote an error→fix pair to tier-3."""
+        table = getattr(app.state, "recall_table", None)
+        if table is None:
+            return {"id": None, "reason": "recall not configured"}
+        from . import recall_index
+
+        fid = recall_index.promote_action(
+            table,
+            action_id=payload.get("error_action_id", ""),
+            text=payload.get("text", ""),
+            project_id=payload.get("project_id"),
+            kind="resolve",
+            metadata={"fix_action_id": payload.get("fix_action_id")},
+        )
+        return {"id": fid}
+
     _register_event_routes(app)
+
+
+def _recall_upsert(
+    app, *, source: str, source_id: str, project_id: str | None, text: str
+) -> None:
+    """Best-effort: upsert a fragment into the recall index if it's loaded.
+    Failures are logged but never break the calling route."""
+    table = getattr(app.state, "recall_table", None)
+    if table is None:
+        return
+    try:
+        from . import recall_index
+
+        recall_index.upsert_fragment(
+            table,
+            source=source,
+            source_id=source_id,
+            project_id=project_id,
+            text=text,
+        )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("recall upsert failed")
 
 
 def _register_event_routes(app: FastAPI) -> None:

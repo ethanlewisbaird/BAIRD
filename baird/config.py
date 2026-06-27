@@ -78,6 +78,12 @@ class HubConfig(BaseModel):
     # Where the model proxy forwards to. Override for staging or a corporate
     # gateway. The hub's OPENROUTER_API_KEY env var supplies the upstream key.
     openrouter_url: str = "https://openrouter.ai/api/v1"
+    # Semantic /recall (optional). When `recall_enabled`, the hub maintains a
+    # LanceDB vector index in <baird_home>/lance/ and answers /recall with a
+    # hybrid SQL + vector merge. Requires `pip install baird[recall]`.
+    recall_enabled: bool = True
+    embedder_model: str = "BAAI/bge-small-en-v1.5"
+    embedder_device: str = "cpu"
 
 
 # ----- Loading helpers -----

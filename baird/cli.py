@@ -946,6 +946,72 @@ files_app = typer.Typer(help="File lineage + registry helpers")
 app.add_typer(files_app, name="files")
 
 
+# ----- recall flag / resolve -----
+
+
+@app.command()
+def flag(
+    action_id: str = typer.Argument(..., help="Full action id to promote"),
+    text: str | None = typer.Option(
+        None, "--text",
+        help="Text snippet to index. Defaults to the action's summary.",
+    ),
+    project_id: str | None = typer.Option(None, "--project"),
+) -> None:
+    """Promote an action snippet to tier-3 in the semantic recall index.
+
+    Use this when an action's summary contains something you want to be sure
+    /recall surfaces later (a hard-won lesson, a finicky command, a key
+    decision baked into output).
+    """
+    with _hub_client_from_host() as hub:
+        action = hub.get_action(action_id)
+        body = text or (action.get("summary") or "").strip()
+        if not body:
+            console.print("[red]nothing to flag — action has no summary[/red]")
+            raise typer.Exit(1)
+        r = hub.flag_action(
+            action_id=action_id, text=body, project_id=project_id or action.get("project_id")
+        )
+    if r is None:
+        console.print("[yellow]recall index not configured — nothing was indexed[/yellow]")
+    else:
+        console.print(f"[green]flagged[/green] {action_id[:8]}  fragment={r['id'][:8]}")
+
+
+@app.command()
+def resolve(
+    error_action: str = typer.Argument(..., help="Action that failed"),
+    fix_action: str = typer.Argument(..., help="Action that fixed it"),
+    project_id: str | None = typer.Option(None, "--project"),
+) -> None:
+    """Promote an error→fix pair into the recall index.
+
+    Stores the error's summary + the fix's summary as one tier-3 fragment so
+    /recall surfaces the pair next time something similar fails.
+    """
+    with _hub_client_from_host() as hub:
+        err = hub.get_action(error_action)
+        fix = hub.get_action(fix_action)
+        body = (
+            f"ERROR ({error_action[:8]}): {(err.get('summary') or '').strip()}\n"
+            f"FIX ({fix_action[:8]}): {(fix.get('summary') or '').strip()}"
+        )
+        r = hub.resolve_pair(
+            error_action_id=error_action,
+            fix_action_id=fix_action,
+            text=body,
+            project_id=project_id or err.get("project_id"),
+        )
+    if r is None:
+        console.print("[yellow]recall index not configured — nothing was indexed[/yellow]")
+    else:
+        console.print(
+            f"[green]resolved[/green] {error_action[:8]} → {fix_action[:8]}  "
+            f"fragment={r['id'][:8]}"
+        )
+
+
 @files_app.command("lineage")
 def files_lineage(file_id: str = typer.Argument(...)) -> None:
     """Show the chain of actions that produced (or modified) a file."""

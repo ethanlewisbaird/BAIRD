@@ -113,6 +113,13 @@ def create_app(hub_cfg: Optional[HubConfig] = None) -> FastAPI:
     app.state.memory_session = make_session_factory(memory_engine)
     app.state.hub_cfg = cfg
 
+    # Optional semantic recall index. None when recall_enabled=False or the
+    # optional deps aren't installed — /recall transparently falls back to
+    # SQL-only in that case.
+    from . import recall_index
+
+    app.state.recall_table = recall_index.ensure_index(cfg)
+
     @app.middleware("http")
     async def _require_bearer(request: Request, call_next):
         token = cfg.auth_token

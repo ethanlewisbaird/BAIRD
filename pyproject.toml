@@ -32,6 +32,14 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
 ]
+# Semantic recall via LanceDB + a local embedder. Optional so a
+# stripped-down install (e.g. a satellite that only talks to the hub) can
+# skip the heavy torch wheel.
+recall = [
+    "lancedb>=0.13",
+    "sentence-transformers>=3.0",
+    "pyarrow>=14.0",
+]
 
 [project.scripts]
 baird = "baird.cli:app"

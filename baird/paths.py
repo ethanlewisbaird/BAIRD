@@ -36,6 +36,11 @@ def memory_db_path() -> Path:
     return baird_home() / "memory.sqlite"
 
 
+def lance_dir_path() -> Path:
+    """`<baird_home>/lance/` — LanceDB tables."""
+    return baird_home() / "lance"
+
+
 def secrets_env_path() -> Path:
     """`<baird_home>/secrets.env` — KEY=value, one per line. chmod 600 it.
 
