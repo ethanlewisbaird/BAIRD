@@ -20,6 +20,9 @@ End-to-end usable. Phases 1–5, the substrate side of 4b/5b, and the production
 | Operations | `<baird_home>/secrets.env` for credentials, auto-add missing columns on engine startup, `baird up`/`stop` hub supervisor, `$BAIRD_HOME` for dev/prod split |
 | Cross-host dispatch | `runnable.kind: command` + `host_id:` runs shell commands on a named satellite via the SSH-tunneled executor; `baird/dispatcher.py` records one Action row regardless of where it ran |
 | Reactive | `baird emit <event>` cross-process via a polled events table; rolling context summariser caches per-session; `baird snakemake --live` streams progress as 10%-bucketed inbox rows |
+| Semantic recall | LanceDB-backed `/recall` with bge-small CPU embeddings; auto-populated on action/decision/notification create; `baird flag` + `baird resolve` for tier-3 promotion |
+| TUI | Rich Live + Layout for `baird code` by default (`--no-tui` falls back); modal diff approval with single-key y/n/e/q; SSE streaming so partial tokens render as they arrive |
+| Research | Pluggable web (Tavily) + MCP servers configured via `~/.baird/mcp_servers.yaml`; planner picks per-sub-query which tool to use |
 
 What's still deferred is called out in [docs/design.md](docs/design.md).
 
@@ -89,7 +92,7 @@ Full step-by-step: [docs/quickstart.md](docs/quickstart.md).
 
 ```bash
 pip install -e ".[dev]"
-pytest                  # 304 tests
+pytest                  # 331 tests
 ruff check baird tests
 ```
 

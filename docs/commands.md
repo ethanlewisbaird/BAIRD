@@ -98,6 +98,23 @@ REPL slash-commands inside `baird code`: `/exit`, `/quit`, `/context`, `/reset`,
 | `baird emit <name> [--payload JSON]` | Publish a reactive event. Stored in the hub's events table; the scheduler polls each tick and republishes onto its in-process bus so reactive triggers fire. |
 | `baird files lineage <file_id>` | Show the actions that produced or modified a file, in order. |
 
+## Recall promotion
+
+| Command | What it does |
+|---|---|
+| `baird flag <action_id> [--text X --project P]` | Promote a snippet from this action's summary into the recall index as tier-3. Defaults to the action's full summary. |
+| `baird resolve <error_action> <fix_action> [--project P]` | Record an error→fix pair as one tier-3 fragment so `/recall` surfaces them together. |
+
+## MCP servers
+
+| Command | What it does |
+|---|---|
+| `baird mcp list` | Configured MCP servers in `~/.baird/mcp_servers.yaml` and the tool count per server |
+| `baird mcp tools <server>` | Tools exposed by one server |
+| `baird mcp call <server> <tool> --args '{...}'` | One-shot tool call for debugging |
+| `baird mcp ping <server>` | Reachability check |
+| `baird research --no-mcp ...` | Skip MCP and use web search only (MCP is enabled by default when configured) |
+
 ## Exit codes
 
 | Code | Meaning |

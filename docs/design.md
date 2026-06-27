@@ -76,44 +76,28 @@ This document captures what's *shipped* against that design and what's deliberat
 - **Permissions → executor**: `baird/executor_client.py` is a typed HTTP wrapper around the satellite executor's four routes; `run_command(project_root=X)` reads `X/.baird/project.yaml` `permissions:` automatically and packages them into the request body. `ProjectYaml` gained the `env:` and `permissions:` fields that were already documented.
 - **Orchestrator → satellite executor dispatch**: `baird/dispatcher.py` runs a `kind=command` task locally if `host_id` is None / matches the hub, otherwise routes through the satellite's executor via the SSH forward tunnel. `baird satellite enroll` now generates a per-satellite `executor_auth_token` (32 hex) on enrolment, writes it into the satellite's `host.yaml` `auth_token:`, AND records it in `satellites.json`.
 
-## Deferred (each its own meaningful slice)
+### Smaller-open sweep
 
-These are real new work, not just substrate plumbing — flagged here so they don't get forgotten:
+- **apply_diff dispatch**: `dispatcher.apply_diff_anywhere()` routes a unified diff to either local `apply_diff_to_repo` or `ExecutorClient.apply_diff` on a named satellite.
+- **Dispatcher retries**: `httpx.ConnectError` / `ReadTimeout` / `RemoteProtocolError` / `TransportError` retried 3× with 1s/3s backoff.
+- **Status fan-in**: dispatcher posts a `failure` inbox row tagged with the originating task_id when a satellite-dispatched command errors out.
+- **Session-message pagination**: `/sessions/{id}/messages?offset=` + the compressor walks pages of 1000 until exhausted.
 
-### LanceDB swap-in for `/recall` + tier-3 promoted-fragment ingestion
+### Final deferred slices (all shipped 2026-06-27)
 
-The `/recall` API shape is locked and SQL-backed today. Swapping to LanceDB needs:
+- **LanceDB semantic recall** with bge-small CPU embedder. `<baird_home>/lance/fragments.lance`, lazy table wrapper to keep hub startup fast, auto-population on action/decision/notification create, hybrid SQL+vector `/recall`, `baird flag` + `baird resolve` for tier-3 promotion. Embedder is configurable via `embedder_model:` — swap to `bge-large` after fixing the GPU driver.
+- **Rich Live + Layout TUI** for `baird code` (default). Header (project/host/branch/model), conversation panel with streaming-aware buffers, status bar, modal diff approval with `y/n/e/q` single-key reading via `tui_keys.read_key`. `--no-tui` falls back to the line REPL.
+- **SSE streaming** end-to-end: `OpenRouterClient.stream_complete()` drives chunked SSE; `/v1/proxy/chat/completions` switches to `StreamingResponse` when `stream:true`, forwards SSE verbatim, watches for a `usage:` chunk to enrich the action; TUI panel updates per-token.
+- **MCP integration**: official `mcp` SDK, sync wrapper, `~/.baird/mcp_servers.yaml` config, planner picks per-sub-query between web and configured MCP tools, `baird mcp list/tools/call/ping` for management.
 
-- An embedding model (OpenRouter doesn't expose embeddings cleanly — likely OpenAI / Voyage / a local model). **Decision required.**
-- A `fragments` table with `(source, source_id, project_id, text, vector, created_at, metadata)`.
-- `baird flag <action_id> --range L100-L150` (user flag), `baird resolve <action_id>` (error→fix pair), the always-promoted paths for first-time-success runs of finicky tools.
-- A migration path for the existing SQL-backed call sites — they keep working unchanged.
+## Still-deferred (intentionally)
 
-Deferred by design: best done once you've used SQL-recall enough to know what filters you actually want.
+These items remain open by choice, not by oversight:
 
-### Full Rich `Live + Layout` TUI for `baird code`
+- **Tool-call sidebar in the TUI** — was in the original design but speculative; deferred until BAIRD actually emits tool calls inside conversations.
+- **Tier-3 auto-promotion rules** — `baird flag` and `baird resolve` are manual; the automatic "first-time-success on a finicky tool" detection from the original design is deferred until recall has enough volume to evaluate it.
+- **Vector index compaction** — LanceDB grows monotonically; periodic compact + dedup of `(source, source_id)` pairs is deferred until the fragments table actually gets large.
+- **Cluster-aware executor dispatch** — currently one satellite per `host_id`. HPC-cluster-style "any node" dispatch with a job queue is deferred.
+- **Long-running tool-call loops in `baird research`** — today the planner picks tools up front; an iterative "based on what I found, search for X next" loop is deferred.
 
-The design pinned a specific layout:
-
-- header (project / host / branch)
-- conversation panel (~70%) + tool-call sidebar
-- live status bar (tokens, cost, inbox count, budget)
-- input line at the bottom with `/`-prefixed commands inside the panel
-- diff approval renders in the conversation panel with `y/n/e/q` key handling
-
-Deferred by design: the line-by-line REPL works. The full TUI is UX iteration that benefits from real use first.
-
-### bioRxiv / PubMed MCP integration as research backends
-
-The `web_search` callable is the seam. Wiring MCP clients depends on which MCP-client library settles in for the broader harness — external dependency choice.
-
-### Streaming responses through `/v1/proxy/chat/completions`
-
-Today the proxy waits for the full upstream response before returning; the REPL doesn't render partial tokens anyway. The right time to wire SSE end-to-end is alongside the full TUI work.
-
-### Smaller follow-ups still open
-
-- `apply_diff` dispatch through the satellite executor (substrate in `ExecutorClient` is there, the runner's `kind=command` doesn't use it yet).
-- Status fan-in across satellites: a satellite executor failure currently shows up under its own action row; surfacing it on the originating task is real work.
-- Retries on transient SSH-tunnel hiccups in `dispatcher.py`.
-- Pagination for sessions over 1000 messages (the compressor caps at the hub's max limit).
+Everything else from the original 5-phase plan is shipped.
