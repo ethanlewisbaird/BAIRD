@@ -170,8 +170,9 @@ HOST_YAML_TEMPLATE = """host_id: {host_id}
 hub_url: {hub_url}
 session_multiplexer: auto
 
-# Inbound bearer the EXECUTOR on this host requires. null = deny inbound calls.
-auth_token: null
+# Inbound bearer the EXECUTOR on this host requires. The hub uses this to
+# dispatch run_command/apply_diff calls back through the SSH forward tunnel.
+auth_token: {executor_auth_token}
 
 # Outbound bearer this satellite sends to the hub.
 hub_auth_token: {hub_auth_token}
@@ -210,7 +211,7 @@ def _yaml_bool(value: bool) -> str:
 
 
 def _render_host_yaml(
-    spec: EnrollSpec, *, remote_home: str
+    spec: EnrollSpec, *, remote_home: str, executor_auth_token: str | None = None
 ) -> str:
     # Expand $HOME (and a leading ~) using the satellite's actual home dir,
     # since pydantic doesn't shell-expand and we want concrete paths in the file.
@@ -223,6 +224,7 @@ def _render_host_yaml(
         host_id=spec.host_id,
         hub_url=spec.hub_url_from_satellite,
         hub_auth_token=_yaml_str(spec.hub_auth_token),
+        executor_auth_token=_yaml_str(executor_auth_token),
         use_hub_for_models=_yaml_bool(spec.use_hub_for_models),
         executor_listen=_yaml_str(spec.executor_listen),
         remote_home=remote_home,
@@ -336,8 +338,15 @@ def enroll(
     if not remote_home:
         remote_home = "/home/" + spec.ssh_host  # rough fallback
 
-    # Step 3: write host.yaml on the satellite.
-    yaml_body = _render_host_yaml(spec, remote_home=remote_home)
+    # Step 3: write host.yaml on the satellite. Generate a per-satellite
+    # executor token so the hub can dispatch commands back through the SSH
+    # forward tunnel; we store the same token on both sides.
+    import secrets
+
+    executor_auth_token = secrets.token_hex(32)
+    yaml_body = _render_host_yaml(
+        spec, remote_home=remote_home, executor_auth_token=executor_auth_token
+    )
     write_cmd = f"mkdir -p {spec.remote_baird_home} && cat > {spec.remote_baird_home}/host.yaml"
     r2 = run(
         ["ssh", "-o", "BatchMode=yes", spec.ssh_host, write_cmd],
@@ -373,6 +382,7 @@ def enroll(
         "local_fwd_port": port,
         "use_hub_for_models": spec.use_hub_for_models,
         "git_ref": spec.git_ref,
+        "executor_auth_token": executor_auth_token,
     }
     save_registry(reg)
 

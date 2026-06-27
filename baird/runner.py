@@ -60,12 +60,26 @@ def run_task_once(
     runnable = task.runnable
     started = time.monotonic()
 
-    # Dispatch on kind. `self_improve` and `research` bypass the model-prompt
-    # path entirely — they own their action accounting.
+    # Dispatch on kind. `self_improve` / `research` / `command` bypass the
+    # model-prompt path entirely — they own their action accounting.
     if runnable.kind == "self_improve":
         return _run_self_improve(task, hub=hub, model_client=model_client, notifier=notifier)
     if runnable.kind == "research":
         return _run_research(task, hub=hub, model_client=model_client, notifier=notifier)
+    if runnable.kind == "command":
+        from .dispatcher import run_command_task
+
+        result = run_command_task(
+            task, hub=hub, hub_host_id=host_id, project_root=project_root
+        )
+        return FiringResult(
+            action_id=result["action_id"],
+            session_id="",
+            completion=None,
+            runtime_s=result["runtime_s"],
+            truncated=False,
+            summary=f"exit={result['exit_code']}",
+        )
 
     # Persistent per-task conversation thread (Phase 4b): one Session per
     # task_id, reused across firings. Context compressor / rolling summary
