@@ -22,7 +22,7 @@ Bare `baird` (no args) prints a context-aware hint based on cwd, then help.
 | `baird diff apply <patch> -m <msg> [--repo --action-id]` | Apply a unified diff file as a BAIRD-trailered git commit |
 | `baird undo [--repo]` | Revert the last BAIRD commit via `git revert` |
 
-REPL slash-commands inside `baird code`: `/exit`, `/quit`, `/context`, `/reset`, `/cost`, `/model [id]`, `/no-diff`, `/help`. `/model` with no argument prints the current model; `/model <id>` switches mid-session.
+REPL slash-commands inside `baird code`: `/exit`, `/quit`, `/context`, `/reset`, `/cost`, `/model [id]`, `/sessions`, `/no-diff`, `/help`. `/model` with no argument prints the current model and a numbered list of popular OpenRouter models; `/model <id-or-index>` switches mid-session. `/sessions` lists the project's prior sessions so you can resume one with `baird code --session <id>`. A bare `"""` line opens a heredoc-style multi-line input block; another `"""` closes it.
 
 ## Tasks
 
@@ -81,7 +81,7 @@ REPL slash-commands inside `baird code`: `/exit`, `/quit`, `/context`, `/reset`,
 
 | Command | What it does |
 |---|---|
-| `baird snakemake <Snakefile> [--cwd --project] [extra args...]` | Run Snakemake, post-parse the report into a summary on the hub |
+| `baird snakemake <Snakefile> [--cwd --project --live] [extra args...]` | Run Snakemake, post-parse the report into a summary on the hub. `--live` streams stdout and posts a `logged` inbox row every 10% of progress. |
 | `baird nextflow <main.nf> [--cwd --project] [extra args...]` | Same for Nextflow (parses `trace.txt`) |
 
 ## Research and self-improvement
@@ -90,6 +90,13 @@ REPL slash-commands inside `baird code`: `/exit`, `/quit`, `/context`, `/reset`,
 |---|---|
 | `baird research "<query>" [--project --model]` | Plan → web search → synthesize → inbox row |
 | `baird improve [--since-hours N --model M]` | Review recent activity, propose harness improvements (prompt edits / new rules / task tuning) as inbox `proposal` rows |
+
+## Events + lineage
+
+| Command | What it does |
+|---|---|
+| `baird emit <name> [--payload JSON]` | Publish a reactive event. Stored in the hub's events table; the scheduler polls each tick and republishes onto its in-process bus so reactive triggers fire. |
+| `baird files lineage <file_id>` | Show the actions that produced or modified a file, in order. |
 
 ## Exit codes
 

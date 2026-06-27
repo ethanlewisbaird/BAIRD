@@ -64,6 +64,18 @@ This document captures what's *shipped* against that design and what's deliberat
 - **Auto schema migration**: `metadata.create_all` + `ALTER TABLE ADD COLUMN` for any declared column not on the existing table. Phase-1 SQLite + Phase-4 code now works seamlessly.
 - **`$BAIRD_HOME`**: state directory override so a dev install and a prod install can run side by side without colliding.
 
+### Gap-finishing pass
+
+- **`baird emit <event>`** publishes a reactive event by POSTing to `/events/{name}`. The scheduler polls the events table every tick and republishes onto its in-process bus so reactive triggers fire across processes.
+- **`baird files lineage <file_id>`** CLI wrapper for the existing `/files/{id}/lineage` route.
+- **REPL multi-line input**: `"""` opens a heredoc-style block, a second `"""` closes it. Body sent as one user message.
+- **REPL session resume**: `baird code --session <id>` attaches to a specific prior session; `/sessions` lists them in-REPL.
+- **`runnable.kind`**: free-form `model` (default), `self_improve`, `research`, and `command`. Each `kind` has its own dispatcher in `runner.py`.
+- **Context compressor**: rolling-summary above N turns, in-process cache keyed by `(session_id, older_count)`. Compressor failure falls back to the old "drop older silently" behaviour.
+- **Snakemake `--live`**: streaming runner pumps stdout/stderr line-by-line; parses `"X of Y steps (Z%) done"` and posts a `logged` inbox row at 10% boundaries (throttled).
+- **Permissions → executor**: `baird/executor_client.py` is a typed HTTP wrapper around the satellite executor's four routes; `run_command(project_root=X)` reads `X/.baird/project.yaml` `permissions:` automatically and packages them into the request body. `ProjectYaml` gained the `env:` and `permissions:` fields that were already documented.
+- **Orchestrator → satellite executor dispatch**: `baird/dispatcher.py` runs a `kind=command` task locally if `host_id` is None / matches the hub, otherwise routes through the satellite's executor via the SSH forward tunnel. `baird satellite enroll` now generates a per-satellite `executor_auth_token` (32 hex) on enrolment, writes it into the satellite's `host.yaml` `auth_token:`, AND records it in `satellites.json`.
+
 ## Deferred (each its own meaningful slice)
 
 These are real new work, not just substrate plumbing — flagged here so they don't get forgotten:
@@ -72,12 +84,12 @@ These are real new work, not just substrate plumbing — flagged here so they do
 
 The `/recall` API shape is locked and SQL-backed today. Swapping to LanceDB needs:
 
-- An embedding model (OpenRouter doesn't expose embeddings cleanly — likely OpenAI / Voyage / a local model).
+- An embedding model (OpenRouter doesn't expose embeddings cleanly — likely OpenAI / Voyage / a local model). **Decision required.**
 - A `fragments` table with `(source, source_id, project_id, text, vector, created_at, metadata)`.
 - `baird flag <action_id> --range L100-L150` (user flag), `baird resolve <action_id>` (error→fix pair), the always-promoted paths for first-time-success runs of finicky tools.
 - A migration path for the existing SQL-backed call sites — they keep working unchanged.
 
-Best done once you've used SQL-recall enough to know what filters you actually want.
+Deferred by design: best done once you've used SQL-recall enough to know what filters you actually want.
 
 ### Full Rich `Live + Layout` TUI for `baird code`
 
@@ -89,34 +101,19 @@ The design pinned a specific layout:
 - input line at the bottom with `/`-prefixed commands inside the panel
 - diff approval renders in the conversation panel with `y/n/e/q` key handling
 
-The current line-by-line REPL works. The full TUI is UX iteration that benefits from real use first.
-
-### Wiring `baird improve` / `baird research` as task `runnable.kind` values
-
-Today, scheduling these means writing a small Python wrapper task or running them on a cron via shell. A first-class `runnable.kind: self_improve` (and `: research`) variant would skip the wrapper, but it needs a small extension of the task schema and runner dispatch — not hard, just deferred until you actually want to schedule them.
+Deferred by design: the line-by-line REPL works. The full TUI is UX iteration that benefits from real use first.
 
 ### bioRxiv / PubMed MCP integration as research backends
 
-The `web_search` callable is the seam. Wiring MCP clients depends on which MCP-client library settles in for the broader harness.
+The `web_search` callable is the seam. Wiring MCP clients depends on which MCP-client library settles in for the broader harness — external dependency choice.
 
-### Orchestrator → satellite executor dispatch
+### Streaming responses through `/v1/proxy/chat/completions`
 
-`baird satellite enroll` gives the hub a way to reach each satellite's executor at `127.0.0.1:<port>` via the SSH forward tunnel. The orchestrator side that picks "execute this on satellite X" is still missing — the scheduler runs all `runnable`s on the hub itself. Wiring it up needs:
+Today the proxy waits for the full upstream response before returning; the REPL doesn't render partial tokens anyway. The right time to wire SSE end-to-end is alongside the full TUI work.
 
-- A `runnable.host_id:` field on the task schema (and a sane default = the hub).
-- Reading `~/.baird/satellites.json` at scheduler startup to map `host_id → executor URL` (the forward port + `auth_token` from the registry).
-- Calling `executor.run_command` over HTTP instead of `subprocess.run` when `host_id` ≠ hub.
-- A status fan-in so failures on a satellite show up under the same action row.
+### Smaller follow-ups still open
 
-Mostly substrate is in place; this is real new work on the orchestrator side.
-
-### Other smaller follow-ups
-
-- `baird emit <event>` CLI to publish reactive events from the shell.
-- `baird files lineage <file_id>` CLI wrapper (the `/files/{id}/lineage` route exists).
-- Context compressor with rolling summarisation (currently the runner just caps history at 20 turns).
-- Snakemake `--live` mode parsing.
-- Multi-line input in the REPL.
-- A "session continuity" command — pick up a prior REPL session and continue.
-- Proper integration of `permissions:` from `project.yaml` into the executor (the schema exists, the loader exists; piping the loaded overrides into every `run_command` call is the missing link).
-- Streaming responses through `/v1/proxy/chat/completions` (today the proxy waits for the full upstream response before returning; the REPL doesn't yet show partial tokens anyway).
+- `apply_diff` dispatch through the satellite executor (substrate in `ExecutorClient` is there, the runner's `kind=command` doesn't use it yet).
+- Status fan-in across satellites: a satellite executor failure currently shows up under its own action row; surfacing it on the originating task is real work.
+- Retries on transient SSH-tunnel hiccups in `dispatcher.py`.
+- Pagination for sessions over 1000 messages (the compressor caps at the hub's max limit).

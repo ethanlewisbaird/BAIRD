@@ -18,6 +18,8 @@ End-to-end usable. Phases 1–5, the substrate side of 4b/5b, and the production
 | 5. Observability | `status` dashboard (one-shot + `--watch`), `logs`/`ps`/`registry actions`/`task history`, mode auto-detection on bare `baird` |
 | Multi-machine | Bearer-token hub auth, `/v1/proxy/chat/completions` (key lives only on the hub), one-command `baird satellite enroll`, persistent SSH tunnels via systemd-user, single unified cost/token ledger |
 | Operations | `<baird_home>/secrets.env` for credentials, auto-add missing columns on engine startup, `baird up`/`stop` hub supervisor, `$BAIRD_HOME` for dev/prod split |
+| Cross-host dispatch | `runnable.kind: command` + `host_id:` runs shell commands on a named satellite via the SSH-tunneled executor; `baird/dispatcher.py` records one Action row regardless of where it ran |
+| Reactive | `baird emit <event>` cross-process via a polled events table; rolling context summariser caches per-session; `baird snakemake --live` streams progress as 10%-bucketed inbox rows |
 
 What's still deferred is called out in [docs/design.md](docs/design.md).
 
@@ -87,7 +89,7 @@ Full step-by-step: [docs/quickstart.md](docs/quickstart.md).
 
 ```bash
 pip install -e ".[dev]"
-pytest                  # 283 tests
+pytest                  # 304 tests
 ruff check baird tests
 ```
 

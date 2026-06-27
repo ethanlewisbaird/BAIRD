@@ -207,6 +207,7 @@ trigger:
   one_shot: false                      # cron tasks that disable themselves after one fire
 
 runnable:
+  kind: model                          # model | self_improve | research | command
   prompt: "Summarise what changed in the last 24h and flag anything that looks off."
   model: anthropic/claude-3-haiku
   system: null                         # optional system prompt
@@ -214,6 +215,8 @@ runnable:
   context_sources: [repo, decisions, rules]
   max_tokens: 1024
   temperature: 0.2
+  host_id: null                        # where to run (kind=command only). null = the hub.
+  args: {}                             # kind-specific extras (see below)
 
 budget:
   max_runtime_s: 120
@@ -252,6 +255,28 @@ trigger:
 ```
 
 Watch firings are debounced (default 2s per task) so editor save bursts don't multi-fire.
+
+### `runnable.kind`
+
+| Kind | What it does | Required fields |
+|---|---|---|
+| `model` (default) | Free-form completion against `prompt` against `model`. | `prompt`, `model` |
+| `self_improve` | Runs the harness self-improvement loop. `args.since_hours` (default 168). | — |
+| `research` | Runs the research loop with `args.query`. | `args.query` |
+| `command` | Runs a shell command. `host_id: null` → on the hub. `host_id: <satellite>` → through the satellite's executor over the SSH tunnel. | `args.cmd`. Optional: `args.cwd`, `args.timeout_s`. |
+
+Example: schedule a Snakemake run on a GPU workstation nightly.
+
+```yaml
+trigger: { type: cron, cron: "0 2 * * *" }
+runnable:
+  kind: command
+  host_id: GPU-wrkstn
+  args:
+    cmd: "cd ~/projects/scrna && snakemake --cores 8"
+    timeout_s: 7200
+budget: { max_runtime_s: 7300 }
+```
 
 ### Concurrency groups
 
