@@ -205,3 +205,42 @@ def test_where_uses_project_locations(fake_env) -> None:
     r = dispatch(cat["where"], {"query": "raw"}, env)
     assert r.ok and len(r.result) == 1
     assert r.result[0]["host"] == "hibu"
+
+
+# ---- Tool surface visible to the model --------------------------------
+
+
+def test_add_project_location_description_includes_intent_phrases() -> None:
+    """Issue 2 regression: when the user says 'location = GPU workstation
+    /data/x' the model should recognise add_project_location as the right
+    verb instead of falling through to a diff against project.yaml. The
+    description has to spell that intent out explicitly — the tool used to
+    say only 'Attach a (host, path) location to a project.' which was too
+    thin for the model to match natural-language phrasing."""
+    cat = build_catalogue()
+    desc = cat["add_project_location"].description.lower()
+    assert "where" in desc and "lives" in desc
+    # A real-user example phrasing
+    assert "location =" in desc
+    # The anti-pattern the model fell into in production
+    assert "diff" in desc and "project.yaml" in desc
+
+
+def test_tool_catalogue_prompt_lists_add_project_location() -> None:
+    from baird.agent_tools import tool_catalogue_prompt
+
+    prompt = tool_catalogue_prompt()
+    assert "add_project_location" in prompt
+    # The description text propagates so the model sees the NL hooks.
+    assert "where a project lives" in prompt.lower()
+    # Required args surfaced.
+    assert "project_id" in prompt and "host" in prompt and "path" in prompt
+
+
+def test_system_prompt_embeds_tool_catalogue() -> None:
+    from baird.repl import _system_prompt
+
+    sp = _system_prompt("## ctx\n\nminimal.")
+    assert "Available hub tools" in sp
+    assert "add_project_location" in sp
+    assert "register_project" in sp

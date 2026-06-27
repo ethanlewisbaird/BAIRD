@@ -56,6 +56,39 @@ def test_render_context_lists_locations() -> None:
     assert "gpu:/scratch" in rendered
 
 
+def test_render_header_uses_first_location_host() -> None:
+    py = ProjectYaml(id="p", name="P")
+    from baird.context_loader import RepoContext
+
+    ctx = RepoContext(
+        project=py, project_root=None, branch=None,
+        host_id="surface",  # hub hostname — must NOT leak into the header
+        locations=[Location(host="hibu", path="/data", role="data")],
+    )
+    rendered = render_context(ctx)
+    assert "Host: hibu" in rendered
+    assert "Host: surface" not in rendered
+
+
+def test_render_header_no_locations_uses_placeholder() -> None:
+    """Issue 3: a project with no locations attached used to render
+    `Host: surface` (the hub itself), misleading the model into thinking
+    the project lived on the hub. Now we show an explicit placeholder
+    that doubles as a UX hint about which slash command fixes it."""
+    py = ProjectYaml(id="p", name="P")
+    from baird.context_loader import NO_LOCATIONS_PLACEHOLDER, RepoContext
+
+    ctx = RepoContext(
+        project=py, project_root=None, branch=None,
+        host_id="surface",
+        locations=[],
+    )
+    rendered = render_context(ctx)
+    assert NO_LOCATIONS_PLACEHOLDER in rendered
+    assert "Host: surface" not in rendered
+    assert "/project add-location" in rendered
+
+
 # ---- active-host carry-over ------------------------------------------
 
 

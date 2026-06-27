@@ -69,11 +69,18 @@ class ReplConfig:
 
 
 def _system_prompt(rendered_context: str) -> str:
+    from .agent_tools import tool_catalogue_prompt
+
     return (
         "You are BAIRD, a bioinformatics research assistant. The active project's "
         "context follows. Be concise; when proposing code, give the change as a "
-        "fenced unified diff so it can be reviewed and applied.\n\n"
+        "fenced unified diff so it can be reviewed and applied. For changes to "
+        "hub-owned state (project locations, decisions, environment installs, "
+        "satellite host.yaml) call the matching tool below instead of writing a "
+        "diff.\n\n"
         + rendered_context
+        + "\n\n"
+        + tool_catalogue_prompt()
     )
 
 

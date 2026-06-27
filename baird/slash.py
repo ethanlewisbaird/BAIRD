@@ -29,6 +29,12 @@ from .agent_tools import (
     dispatch,
 )
 from .memory_client import HubClient
+from .project_enrich import (
+    EnrichmentProposal,
+    LocationProbe,
+    probe_location,
+    propose_enrichment,
+)
 from .tui import FormField, collect_form_values
 
 
@@ -80,6 +86,27 @@ def _absolute_path(v: str) -> str | None:
 # ---- /project new -----------------------------------------------------
 
 
+def _parse_locations_spec(spec: str) -> list[tuple[str, str]]:
+    """Parse `host:path[,host:path...]` into a list of (host, path) pairs.
+
+    Empty string → empty list. Whitespace around each comma-separated entry is
+    trimmed. Entries without a colon, or with an empty host or path, are
+    skipped silently — `collect_form_values` doesn't have a hook to re-prompt
+    a single subfield, so we prefer succeed-with-warning over blocking project
+    creation on a partial typo.
+    """
+    out: list[tuple[str, str]] = []
+    for entry in (e.strip() for e in spec.split(",")):
+        if not entry or ":" not in entry:
+            continue
+        host, _, path = entry.partition(":")
+        host = host.strip()
+        path = path.strip()
+        if host and path:
+            out.append((host, path))
+    return out
+
+
 def cmd_project_new(parts: list[str], ctx: SlashContext) -> SlashResult:
     pos, kv = parse_kv_args(parts)
     known: dict[str, str] = dict(kv)
@@ -91,6 +118,11 @@ def cmd_project_new(parts: list[str], ctx: SlashContext) -> SlashResult:
         FormField("id", "project id (slug)", required=True),
         FormField("name", "human-readable name", required=False),
         FormField("github", "GitHub repo (owner/name)", required=False),
+        FormField(
+            "locations",
+            "locations (host:path[,host:path...]) — empty to add later",
+            required=False,
+        ),
     ]
     vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
     result = ctx.hub.upsert_project(
@@ -98,11 +130,168 @@ def cmd_project_new(parts: list[str], ctx: SlashContext) -> SlashResult:
         name=vals.get("name") or vals["id"],
         github=vals.get("github") or None,
     )
+    pid = result["id"]
+    added: list[tuple[str, str]] = []
+    for host, path in _parse_locations_spec(vals.get("locations", "")):
+        try:
+            ctx.hub.add_project_location(pid, host=host, path=path, role=None)
+            added.append((host, path))
+        except Exception as e:  # surfaced to user; project row already exists
+            return SlashResult(
+                handled=True,
+                ok=False,
+                output=(
+                    f"created project {pid}, but failed to add location "
+                    f"{host}:{path}: {e}"
+                ),
+                switch_to_project=pid,
+            )
+    extra = f" with {len(added)} location(s)" if added else ""
+    enrich_note = ""
+    if added:
+        # Only auto-enrich when at least one location was attached — there's
+        # nothing to probe otherwise. The user can re-run later with
+        # `/project enrich <id>` once locations are added.
+        try:
+            enrich_summary = _run_enrichment(pid, ctx)
+            if enrich_summary:
+                enrich_note = f"\n{enrich_summary}"
+        except Exception as e:  # never block creation on enrichment failure
+            enrich_note = f"\n(enrichment skipped: {e})"
     return SlashResult(
         handled=True,
-        output=f"created project {result['id']}",
-        switch_to_project=result["id"],
+        output=f"created project {pid}{extra}{enrich_note}",
+        switch_to_project=pid,
     )
+
+
+# ---- /project enrich --------------------------------------------------
+
+
+def cmd_project_enrich(parts: list[str], ctx: SlashContext) -> SlashResult:
+    pos, kv = parse_kv_args(parts)
+    known = dict(kv)
+    if pos:
+        known.setdefault("project_id", pos[0])
+    fields = [FormField("project_id", "project id", required=True)]
+    vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
+    try:
+        summary = _run_enrichment(vals["project_id"], ctx)
+    except Exception as e:
+        return SlashResult(handled=True, ok=False, output=f"enrichment failed: {e}")
+    return SlashResult(handled=True, output=summary or "no enrichment proposals")
+
+
+def _make_reader_from_env(env: ToolEnv):
+    """Build a `RemoteReader` over the ToolEnv's executor factory. Returns
+    None for missing files; raises only for hard transport errors so the
+    probe layer can short-circuit them per file."""
+
+    def _read(host: str, path: str) -> str | None:
+        try:
+            with env.open_executor(host) as ex:
+                body = ex.read_file(path)
+            return body.get("content") if isinstance(body, dict) else None
+        except Exception:
+            # Most read_file misses come back as HTTPStatusError(404) or
+            # FileNotFoundError; treat them all as "not present" so the
+            # probe just leaves the slot empty.
+            return None
+
+    return _read
+
+
+def _run_enrichment(project_id: str, ctx: SlashContext) -> str:
+    """Probe each location of `project_id`, present field proposals via
+    `collect_form_values`, and save accepted values back through
+    `hub.upsert_project`. Returns a short summary string for the REPL."""
+    project = ctx.hub.get_project(project_id)
+    locations = ctx.hub.list_project_locations(project_id)
+    if not locations:
+        return "no locations to probe — add one with /project add-location"
+
+    reader = _make_reader_from_env(ctx.env)
+    probes: list[LocationProbe] = [
+        probe_location(reader, loc["host"], loc["path"]) for loc in locations
+    ]
+    proposal: EnrichmentProposal = propose_enrichment(project, probes)
+    if not proposal.proposals:
+        return "no empty fields to enrich"
+
+    # Build a form: one field per proposal. The user gets the proposed
+    # value as the default, "(none found — leave blank?)" for misses, and
+    # can accept (enter), edit (type), or blank (type a single dash).
+    form_fields: list[FormField] = []
+    proposed_serialized: dict[str, str] = {}
+    for prop in proposal.proposals:
+        if prop.value is None:
+            label = f"{prop.field} — (none found — leave blank?) [source: {prop.source}]"
+            default = ""
+        else:
+            display = (
+                str(prop.value)
+                if not isinstance(prop.value, dict)
+                else ", ".join(f"{k}={v}" for k, v in prop.value.items())
+            )
+            label = f"{prop.field} — accept [source: {prop.source}]"
+            default = display
+            proposed_serialized[prop.field] = display
+        form_fields.append(FormField(prop.field, label, default=default or None, required=False))
+
+    # We pass an empty `known` so each field is presented; users hit enter
+    # to accept the default (the proposed value), type something else to
+    # edit, or type "-" to blank.
+    answers = collect_form_values(
+        form_fields, {}, input_fn=ctx.input_fn, console=ctx.console
+    )
+
+    # Translate answers back into upsert_project arguments. `-` means blank
+    # (user explicitly rejected the proposal); empty string means "keep
+    # existing" — but since we only proposed for empty fields, both are
+    # effectively the same for now.
+    updates: dict[str, object] = {}
+    cfg_updates: dict[str, object] = {}
+    for prop in proposal.proposals:
+        raw = answers.get(prop.field, "")
+        if raw == "-" or raw == "":
+            continue
+        if prop.field == "env":
+            # The user may have edited a dict-as-text — parse `k=v,k=v`.
+            cfg_updates["env"] = _parse_kv_dict(raw, fallback=prop.value)
+        else:
+            updates[prop.field] = raw
+
+    if not updates and not cfg_updates:
+        return "no changes accepted from enrichment proposals"
+
+    new_cfg = dict(project.get("config") or {})
+    new_cfg.update(cfg_updates)
+    ctx.hub.upsert_project(
+        id=project["id"],
+        name=project.get("name") or project["id"],
+        github=updates.get("github", project.get("github")),
+        context=updates.get("context", project.get("context")),
+        config=new_cfg,
+    )
+    accepted = list(updates) + list(cfg_updates)
+    return f"enriched: {', '.join(accepted)}"
+
+
+def _parse_kv_dict(text: str, fallback: object | None) -> dict:
+    """Parse `k=v,k=v` back into a dict, falling back to the original
+    proposal when parsing fails (user edited freeform). The form layer
+    doesn't have a way to round-trip a typed object, so dicts go through
+    a string representation."""
+    if isinstance(fallback, dict):
+        out = dict(fallback)
+    else:
+        out = {}
+    for entry in (e.strip() for e in text.split(",")):
+        if not entry or "=" not in entry:
+            continue
+        k, _, v = entry.partition("=")
+        out[k.strip()] = v.strip()
+    return out
 
 
 # ---- /project locations ----------------------------------------------
@@ -127,6 +316,47 @@ def cmd_project_locations(parts: list[str], ctx: SlashContext) -> SlashResult:
 # ---- /project add-location -------------------------------------------
 
 
+def _resolve_satellite_host(host: str) -> tuple[str | None, str | None]:
+    """Match `host` against the satellite registry.
+
+    Returns `(canonical_host_id, None)` on a hit (case-insensitive match;
+    the stored value is the registry's casing). Returns `(None, error)`
+    when there's no match — the error message lists enrolled hosts and a
+    closest-match suggestion via difflib, so the user can correct the
+    typo without having to run `baird satellite list` themselves.
+
+    Lives in slash.py because the validation is a UX concern (turning a
+    bare ValueError from the hub into actionable text); other call sites
+    (e.g. add_project_location agent tool) can either re-use this or let
+    the hub raise raw.
+    """
+    import difflib
+
+    from .satellite import load_registry
+
+    try:
+        reg = load_registry()
+    except Exception as e:
+        # Fail open — better to let the hub call surface its own error than
+        # to block legitimate additions because the registry is unreadable.
+        return host, f"(warning: could not read satellite registry: {e})"
+    if not reg:
+        return None, "no satellites enrolled — run `/host add <ssh_host>` first"
+    by_lower = {hid.lower(): hid for hid in reg}
+    canonical = by_lower.get(host.lower())
+    if canonical is not None:
+        return canonical, None
+    suggestions = difflib.get_close_matches(host.lower(), list(by_lower), n=1, cutoff=0.4)
+    suggestion = (
+        f" did you mean `{by_lower[suggestions[0]]}`?" if suggestions else ""
+    )
+    enrolled = ", ".join(sorted(reg))
+    return None, (
+        f"unknown host {host!r}.{suggestion} "
+        f"Enrolled satellites: {enrolled}."
+    )
+
+
 def cmd_project_add_location(parts: list[str], ctx: SlashContext) -> SlashResult:
     pos, kv = parse_kv_args(parts)
     known = dict(kv)
@@ -142,6 +372,10 @@ def cmd_project_add_location(parts: list[str], ctx: SlashContext) -> SlashResult
         FormField("role", "role tag (data | compute | notebook | repo)", required=False),
     ]
     vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
+    canonical, err = _resolve_satellite_host(vals["host"])
+    if canonical is None:
+        return SlashResult(handled=True, ok=False, output=err or "unknown host")
+    vals["host"] = canonical
     rows = ctx.hub.add_project_location(
         vals["project_id"], host=vals["host"], path=vals["path"], role=vals.get("role")
     )
@@ -350,6 +584,7 @@ _COMMANDS: dict[str, HandlerFn] = {
     "project new": cmd_project_new,
     "project locations": cmd_project_locations,
     "project add-location": cmd_project_add_location,
+    "project enrich": cmd_project_enrich,
     "host add": cmd_host_add,
     "host edit": cmd_host_edit,
     "env install": cmd_env_install,
