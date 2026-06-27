@@ -142,6 +142,34 @@ class HubClient:
         r.raise_for_status()
         return r.json()
 
+    # ---- Project locations ----
+
+    def list_project_locations(self, project_id: str) -> list[dict]:
+        r = self._client.get(f"/projects/{project_id}/locations")
+        r.raise_for_status()
+        return r.json()
+
+    def add_project_location(
+        self, project_id: str, *, host: str, path: str, role: str | None = None
+    ) -> list[dict]:
+        r = self._client.post(
+            f"/projects/{project_id}/locations",
+            json={"host": host, "path": path, "role": role},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def remove_project_location(
+        self, project_id: str, *, host: str, path: str
+    ) -> list[dict]:
+        r = self._client.request(
+            "DELETE",
+            f"/projects/{project_id}/locations",
+            params={"host": host, "path": path},
+        )
+        r.raise_for_status()
+        return r.json()
+
     # ---- Decisions ----
 
     def record_decision(self, project_id: str, text: str, *, author: str = "user") -> dict:
