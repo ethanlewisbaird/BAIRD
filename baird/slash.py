@@ -29,6 +29,12 @@ from .agent_tools import (
     dispatch,
 )
 from .memory_client import HubClient
+from .project_enrich import (
+    EnrichmentProposal,
+    LocationProbe,
+    probe_location,
+    propose_enrichment,
+)
 from .tui import FormField, collect_form_values
 
 
@@ -141,11 +147,151 @@ def cmd_project_new(parts: list[str], ctx: SlashContext) -> SlashResult:
                 switch_to_project=pid,
             )
     extra = f" with {len(added)} location(s)" if added else ""
+    enrich_note = ""
+    if added:
+        # Only auto-enrich when at least one location was attached — there's
+        # nothing to probe otherwise. The user can re-run later with
+        # `/project enrich <id>` once locations are added.
+        try:
+            enrich_summary = _run_enrichment(pid, ctx)
+            if enrich_summary:
+                enrich_note = f"\n{enrich_summary}"
+        except Exception as e:  # never block creation on enrichment failure
+            enrich_note = f"\n(enrichment skipped: {e})"
     return SlashResult(
         handled=True,
-        output=f"created project {pid}{extra}",
+        output=f"created project {pid}{extra}{enrich_note}",
         switch_to_project=pid,
     )
+
+
+# ---- /project enrich --------------------------------------------------
+
+
+def cmd_project_enrich(parts: list[str], ctx: SlashContext) -> SlashResult:
+    pos, kv = parse_kv_args(parts)
+    known = dict(kv)
+    if pos:
+        known.setdefault("project_id", pos[0])
+    fields = [FormField("project_id", "project id", required=True)]
+    vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
+    try:
+        summary = _run_enrichment(vals["project_id"], ctx)
+    except Exception as e:
+        return SlashResult(handled=True, ok=False, output=f"enrichment failed: {e}")
+    return SlashResult(handled=True, output=summary or "no enrichment proposals")
+
+
+def _make_reader_from_env(env: ToolEnv):
+    """Build a `RemoteReader` over the ToolEnv's executor factory. Returns
+    None for missing files; raises only for hard transport errors so the
+    probe layer can short-circuit them per file."""
+
+    def _read(host: str, path: str) -> str | None:
+        try:
+            with env.open_executor(host) as ex:
+                body = ex.read_file(path)
+            return body.get("content") if isinstance(body, dict) else None
+        except Exception:
+            # Most read_file misses come back as HTTPStatusError(404) or
+            # FileNotFoundError; treat them all as "not present" so the
+            # probe just leaves the slot empty.
+            return None
+
+    return _read
+
+
+def _run_enrichment(project_id: str, ctx: SlashContext) -> str:
+    """Probe each location of `project_id`, present field proposals via
+    `collect_form_values`, and save accepted values back through
+    `hub.upsert_project`. Returns a short summary string for the REPL."""
+    project = ctx.hub.get_project(project_id)
+    locations = ctx.hub.list_project_locations(project_id)
+    if not locations:
+        return "no locations to probe — add one with /project add-location"
+
+    reader = _make_reader_from_env(ctx.env)
+    probes: list[LocationProbe] = [
+        probe_location(reader, loc["host"], loc["path"]) for loc in locations
+    ]
+    proposal: EnrichmentProposal = propose_enrichment(project, probes)
+    if not proposal.proposals:
+        return "no empty fields to enrich"
+
+    # Build a form: one field per proposal. The user gets the proposed
+    # value as the default, "(none found — leave blank?)" for misses, and
+    # can accept (enter), edit (type), or blank (type a single dash).
+    form_fields: list[FormField] = []
+    proposed_serialized: dict[str, str] = {}
+    for prop in proposal.proposals:
+        if prop.value is None:
+            label = f"{prop.field} — (none found — leave blank?) [source: {prop.source}]"
+            default = ""
+        else:
+            display = (
+                str(prop.value)
+                if not isinstance(prop.value, dict)
+                else ", ".join(f"{k}={v}" for k, v in prop.value.items())
+            )
+            label = f"{prop.field} — accept [source: {prop.source}]"
+            default = display
+            proposed_serialized[prop.field] = display
+        form_fields.append(FormField(prop.field, label, default=default or None, required=False))
+
+    # We pass an empty `known` so each field is presented; users hit enter
+    # to accept the default (the proposed value), type something else to
+    # edit, or type "-" to blank.
+    answers = collect_form_values(
+        form_fields, {}, input_fn=ctx.input_fn, console=ctx.console
+    )
+
+    # Translate answers back into upsert_project arguments. `-` means blank
+    # (user explicitly rejected the proposal); empty string means "keep
+    # existing" — but since we only proposed for empty fields, both are
+    # effectively the same for now.
+    updates: dict[str, object] = {}
+    cfg_updates: dict[str, object] = {}
+    for prop in proposal.proposals:
+        raw = answers.get(prop.field, "")
+        if raw == "-" or raw == "":
+            continue
+        if prop.field == "env":
+            # The user may have edited a dict-as-text — parse `k=v,k=v`.
+            cfg_updates["env"] = _parse_kv_dict(raw, fallback=prop.value)
+        else:
+            updates[prop.field] = raw
+
+    if not updates and not cfg_updates:
+        return "no changes accepted from enrichment proposals"
+
+    new_cfg = dict(project.get("config") or {})
+    new_cfg.update(cfg_updates)
+    ctx.hub.upsert_project(
+        id=project["id"],
+        name=project.get("name") or project["id"],
+        github=updates.get("github", project.get("github")),
+        context=updates.get("context", project.get("context")),
+        config=new_cfg,
+    )
+    accepted = list(updates) + list(cfg_updates)
+    return f"enriched: {', '.join(accepted)}"
+
+
+def _parse_kv_dict(text: str, fallback: object | None) -> dict:
+    """Parse `k=v,k=v` back into a dict, falling back to the original
+    proposal when parsing fails (user edited freeform). The form layer
+    doesn't have a way to round-trip a typed object, so dicts go through
+    a string representation."""
+    if isinstance(fallback, dict):
+        out = dict(fallback)
+    else:
+        out = {}
+    for entry in (e.strip() for e in text.split(",")):
+        if not entry or "=" not in entry:
+            continue
+        k, _, v = entry.partition("=")
+        out[k.strip()] = v.strip()
+    return out
 
 
 # ---- /project locations ----------------------------------------------
@@ -438,6 +584,7 @@ _COMMANDS: dict[str, HandlerFn] = {
     "project new": cmd_project_new,
     "project locations": cmd_project_locations,
     "project add-location": cmd_project_add_location,
+    "project enrich": cmd_project_enrich,
     "host add": cmd_host_add,
     "host edit": cmd_host_edit,
     "env install": cmd_env_install,
