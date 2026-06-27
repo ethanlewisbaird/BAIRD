@@ -58,9 +58,16 @@ def load_history_with_summary(
     """Return up to `cap` recent messages, prepending a synthetic system
     message summarising anything older if the session has more than `cap`
     entries. Returns an empty list when the session has no history."""
-    # Hub caps `limit` at 1000; sessions longer than that would need pagination
-    # (deferred — no real one ever gets close in practice).
-    all_msgs = hub.get_messages(session_id, limit=1000)
+    # Walk all pages — hub caps `limit` at 1000 per call but supports offset.
+    all_msgs: list[dict[str, Any]] = []
+    page = 1000
+    while True:
+        chunk = hub.get_messages(session_id, limit=page, offset=len(all_msgs))
+        if not chunk:
+            break
+        all_msgs.extend(chunk)
+        if len(chunk) < page:
+            break
     if len(all_msgs) <= cap:
         return [
             {"role": m["role"], "content": m["content"]}

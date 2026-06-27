@@ -110,6 +110,143 @@ def test_dispatch_records_action_on_hub(client: TestClient) -> None:
     assert action["exit_code"] == 0
 
 
+def test_failure_notifies_on_originating_task(client: TestClient) -> None:
+    """Non-zero exit code → failure notification keyed by task_id, so a
+    satellite failure surfaces in `baird inbox` next to other failures
+    from the same task."""
+    from baird.notifier import FakeTelegramTransport, Notifier, TelegramConfig
+
+    transport = FakeTelegramTransport()
+    notifier = Notifier(
+        hub=_Hub(client),
+        telegram=TelegramConfig(bot_token=None, chat_id=None),
+        transport=transport,
+    )
+    task = _task(host_id=None, cmd="bash -c 'exit 7'")
+    res = run_command_task(task, hub=_Hub(client), notifier=notifier)
+    assert res["exit_code"] == 7
+    rows = _Hub(client).list_notifications()
+    failures = [n for n in rows if n["kind"] == "failure" and n.get("task_id") == "t1"]
+    assert len(failures) == 1
+
+
+def test_apply_diff_local_uses_diff_apply_to_repo(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """host_id=None → call apply_diff_to_repo directly."""
+    from baird import diff_apply as _da
+    from baird.dispatcher import apply_diff_anywhere
+
+    captured: dict = {}
+
+    class _Result:
+        commit_sha = "abc123"
+        files_changed = ["a.py", "b.py"]
+
+    def fake_apply(*, repo, diff_text, commit_message, action_id=None):
+        captured["repo"] = repo
+        captured["msg"] = commit_message
+        return _Result()
+
+    monkeypatch.setattr(_da, "apply_diff_to_repo", fake_apply)
+
+    out = apply_diff_anywhere(
+        diff="--- a\n+++ b\n",
+        commit_message="hi",
+        project_root=tmp_path,
+        host_id=None,
+    )
+    assert out["commit_sha"] == "abc123"
+    assert out["files_changed"] == ["a.py", "b.py"]
+    assert captured["repo"] == tmp_path
+
+
+def test_apply_diff_satellite_uses_executor_client(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("BAIRD_HOME", str(tmp_path))
+    (tmp_path / "satellites.json").write_text(json.dumps({
+        "hibu": {"ssh_host": "hibu", "local_fwd_port": 8766, "executor_auth_token": "tok"}
+    }))
+
+    captured: dict = {}
+
+    class _StubClient:
+        def __init__(self, base_url, token, **kw):
+            captured["base_url"] = base_url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def apply_diff(self, diff, *, project_root, commit_message, **kw):
+            captured["diff"] = diff
+            captured["project_root"] = project_root
+            captured["msg"] = commit_message
+            return {"commit_sha": "remote-sha", "files_changed": ["x.py"]}
+
+    from baird.dispatcher import apply_diff_anywhere
+    monkeypatch.setattr("baird.dispatcher.ExecutorClient", _StubClient)
+
+    out = apply_diff_anywhere(
+        diff="--- a\n+++ b\n",
+        commit_message="from hub",
+        project_root=tmp_path / "repo",
+        host_id="hibu",
+    )
+    assert out["commit_sha"] == "remote-sha"
+    assert captured["base_url"] == "http://127.0.0.1:8766"
+    assert captured["msg"] == "from hub"
+
+
+def test_dispatcher_retries_on_connect_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """First two attempts hit ConnectError; third succeeds. Dispatcher
+    should swallow the transients and return the eventual success."""
+    import httpx
+
+    from baird import dispatcher as disp
+
+    monkeypatch.setenv("BAIRD_HOME", str(tmp_path))
+    (tmp_path / "satellites.json").write_text(json.dumps({
+        "hibu": {"ssh_host": "hibu", "local_fwd_port": 8766, "executor_auth_token": "tok"}
+    }))
+
+    calls = {"n": 0}
+
+    class _Stub:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *exc): return None
+
+        def run_command(self, *a, **kw):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise httpx.ConnectError("tunnel down")
+            return {"exit_code": 0, "stdout": "yay", "stderr": "", "tier": "project"}
+
+    monkeypatch.setattr(disp, "ExecutorClient", _Stub)
+    # Make backoff effectively zero in tests.
+    monkeypatch.setattr(disp, "_retry", lambda op, **kw: _real_retry_no_sleep(op))
+
+    def _real_retry_no_sleep(op):
+        last = None
+        for _ in range(3):
+            try:
+                return op()
+            except Exception as e:
+                last = e
+        raise last  # type: ignore[misc]
+
+    task = _task(host_id="hibu", cmd="ls")
+    res = run_command_task(task, hub=_Hub(client))
+    assert res["exit_code"] == 0
+    assert calls["n"] == 3
+
+
 def test_render_host_yaml_includes_executor_token() -> None:
     from baird.satellite import EnrollSpec, _render_host_yaml
 

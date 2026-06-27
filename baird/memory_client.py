@@ -346,9 +346,12 @@ class HubClient:
         r.raise_for_status()
         return r.json()
 
-    def get_messages(self, session_id: str, *, limit: int = 200) -> list[dict]:
+    def get_messages(
+        self, session_id: str, *, limit: int = 200, offset: int = 0
+    ) -> list[dict]:
         r = self._client.get(
-            f"/sessions/{session_id}/messages", params={"limit": limit}
+            f"/sessions/{session_id}/messages",
+            params={"limit": limit, "offset": offset},
         )
         r.raise_for_status()
         return r.json()

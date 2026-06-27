@@ -550,6 +550,7 @@ def register_routes(app: FastAPI) -> None:
     def get_messages(
         session_id: str,
         limit: int = Query(200, le=1000),
+        offset: int = Query(0, ge=0),
         s: Session = Depends(get_memory),
     ) -> list:
         if s.get(SessionRow, session_id) is None:
@@ -558,6 +559,7 @@ def register_routes(app: FastAPI) -> None:
             select(Message)
             .where(Message.session_id == session_id)
             .order_by(Message.created_at)
+            .offset(offset)
             .limit(limit)
         ).all()
         return [

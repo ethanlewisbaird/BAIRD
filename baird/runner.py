@@ -70,7 +70,11 @@ def run_task_once(
         from .dispatcher import run_command_task
 
         result = run_command_task(
-            task, hub=hub, hub_host_id=host_id, project_root=project_root
+            task,
+            hub=hub,
+            hub_host_id=host_id,
+            project_root=project_root,
+            notifier=notifier,
         )
         return FiringResult(
             action_id=result["action_id"],
