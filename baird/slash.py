@@ -67,16 +67,91 @@ HandlerFn = Callable[[list[str], SlashContext], SlashResult]
 
 
 def parse_kv_args(parts: Iterable[str]) -> tuple[list[str], dict[str, str]]:
-    """Split `parts` into positional + key=value pairs. Quoted values OK."""
+    """Split `parts` into positional + key=value pairs. Quoted values OK.
+
+    Kept as a thin wrapper over `parse_inline_args` for back-compat. New
+    code should prefer `parse_inline_args` so it can surface parse errors.
+    """
+    pos, kv, _err = parse_inline_args(list(parts))
+    return pos, kv
+
+
+def parse_inline_args(
+    parts: list[str],
+) -> tuple[list[str], dict[str, str], str | None]:
+    """Parse a slash command's token list into (positional, flags, error).
+
+    Recognised shapes:
+      - `--key value`  — two tokens
+      - `--key=value`  — single token
+      - `key=value`    — single token
+      - anything else  — positional
+
+    A flag whose value starts with `--` (or that has no value) is rejected
+    with a clear error — see issue #2 — because in real use that always
+    means an upstream flag was mistyped (e.g. `/foo --bar --baz qux` where
+    the user meant `/foo --bar X --baz qux`).
+    """
     positional: list[str] = []
     kv: dict[str, str] = {}
-    for p in parts:
+    i = 0
+    while i < len(parts):
+        p = parts[i]
+        if p.startswith("--") and len(p) > 2:
+            key = p[2:]
+            if "=" in key:
+                k, _, v = key.partition("=")
+                if not k:
+                    return positional, kv, f"malformed flag {p!r}"
+                if v.startswith("--"):
+                    return (
+                        positional,
+                        kv,
+                        f"flag --{k} has a flag-looking value {v!r} — "
+                        f"did you mean to quote it?",
+                    )
+                kv[k] = v
+                i += 1
+                continue
+            if i + 1 >= len(parts):
+                return positional, kv, f"flag --{key} is missing a value"
+            v = parts[i + 1]
+            if v.startswith("--"):
+                return (
+                    positional,
+                    kv,
+                    f"flag --{key} has a flag-looking value {v!r} — "
+                    f"did you mean to quote it, or supply a value for --{key}?",
+                )
+            kv[key] = v
+            i += 2
+            continue
         if "=" in p and not p.startswith("="):
             k, _, v = p.partition("=")
             kv[k] = v
-        else:
-            positional.append(p)
-    return positional, kv
+            i += 1
+            continue
+        positional.append(p)
+        i += 1
+    return positional, kv, None
+
+
+def _reject_flaglike_values(known: dict[str, str]) -> str | None:
+    """Defensive guard for issue #2: refuse to submit a form when any
+    already-supplied value starts with `--`. The inline parser catches
+    this at parse time, but if a flag-looking string ever sneaks into a
+    positional slot via shell quoting or a regression, this stops the
+    form from happily storing it. Returns a clear error message or None.
+    """
+    for k, v in known.items():
+        if isinstance(v, str) and v.startswith("--"):
+            hint = v[2:].split()[0] if len(v) > 2 else ""
+            suffix = f" — did you mean `--{hint} <value>`?" if hint else ""
+            return (
+                f"value for {k!r} starts with '--' ({v!r}) — "
+                f"looks like an unparsed flag{suffix}"
+            )
+    return None
 
 
 def _absolute_path(v: str) -> str | None:
@@ -107,36 +182,20 @@ def _parse_locations_spec(spec: str) -> list[tuple[str, str]]:
     return out
 
 
-def _pluck_flag(parts: list[str], flag: str) -> tuple[list[str], str | None]:
-    """Extract `--<flag> <value>` (two tokens) from parts. Returns the
-    remaining tokens and the value (or None if absent). `--flag=value`
-    one-token form already round-trips through parse_kv_args, so we don't
-    handle it here."""
-    out: list[str] = []
-    value: str | None = None
-    i = 0
-    while i < len(parts):
-        if parts[i] == f"--{flag}" and i + 1 < len(parts):
-            value = parts[i + 1]
-            i += 2
-            continue
-        out.append(parts[i])
-        i += 1
-    return out, value
-
-
 def cmd_project_new(parts: list[str], ctx: SlashContext) -> SlashResult:
-    # `/project new <id> --parent <pid>` shorthand → lift the two-token
-    # `--parent X` form into the kv map before generic parsing.
-    parts, parent_flag = _pluck_flag(parts, "parent")
-    pos, kv = parse_kv_args(parts)
+    # Generic parser handles `--<field> <value>` and `--<field>=<value>`
+    # for ANY field, not just --parent. See issue #1.
+    pos, kv, err = parse_inline_args(parts)
+    if err:
+        return SlashResult(handled=True, ok=False, output=err)
     known: dict[str, str] = dict(kv)
-    if parent_flag is not None:
-        known.setdefault("parent", parent_flag)
     if pos:
         known.setdefault("id", pos[0])
         if len(pos) > 1:
             known.setdefault("name", " ".join(pos[1:]))
+    guard = _reject_flaglike_values(known)
+    if guard:
+        return SlashResult(handled=True, ok=False, output=guard)
     fields = [
         FormField("id", "project id (slug)", required=True),
         FormField("name", "human-readable name", required=False),
@@ -246,10 +305,15 @@ def _resolve_parent_project(
 
 
 def cmd_project_enrich(parts: list[str], ctx: SlashContext) -> SlashResult:
-    pos, kv = parse_kv_args(parts)
+    pos, kv, err = parse_inline_args(parts)
+    if err:
+        return SlashResult(handled=True, ok=False, output=err)
     known = dict(kv)
     if pos:
         known.setdefault("project_id", pos[0])
+    guard = _reject_flaglike_values(known)
+    if guard:
+        return SlashResult(handled=True, ok=False, output=guard)
     fields = [FormField("project_id", "project id", required=True)]
     vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
     try:
@@ -375,10 +439,15 @@ def _parse_kv_dict(text: str, fallback: object | None) -> dict:
 
 
 def cmd_project_locations(parts: list[str], ctx: SlashContext) -> SlashResult:
-    pos, kv = parse_kv_args(parts)
+    pos, kv, err = parse_inline_args(parts)
+    if err:
+        return SlashResult(handled=True, ok=False, output=err)
     known = dict(kv)
     if pos:
         known.setdefault("project_id", pos[0])
+    guard = _reject_flaglike_values(known)
+    if guard:
+        return SlashResult(handled=True, ok=False, output=guard)
     fields = [FormField("project_id", "project id", required=True)]
     vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
     rows = ctx.hub.list_project_locations(vals["project_id"])
@@ -435,13 +504,18 @@ def _resolve_satellite_host(host: str) -> tuple[str | None, str | None]:
 
 
 def cmd_project_add_location(parts: list[str], ctx: SlashContext) -> SlashResult:
-    pos, kv = parse_kv_args(parts)
+    pos, kv, err = parse_inline_args(parts)
+    if err:
+        return SlashResult(handled=True, ok=False, output=err)
     known = dict(kv)
     # Positional shorthand: /project add-location <pid> <host> <path> [role]
     if pos:
         keys = ["project_id", "host", "path", "role"]
         for k, v in zip(keys, pos, strict=False):
             known.setdefault(k, v)
+    guard = _reject_flaglike_values(known)
+    if guard:
+        return SlashResult(handled=True, ok=False, output=guard)
     fields = [
         FormField("project_id", "project id", required=True),
         FormField("host", "host id", required=True),
@@ -470,10 +544,15 @@ def cmd_host_add(parts: list[str], ctx: SlashContext) -> SlashResult:
     does the SSH-out + bootstrap + tunnel install."""
     from .satellite import enroll, enroll_spec_from_local
 
-    pos, kv = parse_kv_args(parts)
+    pos, kv, err = parse_inline_args(parts)
+    if err:
+        return SlashResult(handled=True, ok=False, output=err)
     known = dict(kv)
     if pos:
         known.setdefault("ssh_host", pos[0])
+    guard = _reject_flaglike_values(known)
+    if guard:
+        return SlashResult(handled=True, ok=False, output=guard)
     fields = [
         FormField("ssh_host", "ssh alias or user@host", required=True),
         FormField("host_id", "BAIRD host_id (defaults to ssh alias)", required=False),
@@ -501,7 +580,9 @@ def cmd_host_edit(parts: list[str], ctx: SlashContext) -> SlashResult:
     """Wraps the `set_watch_root` agent tool — the only host.yaml field we
     currently expose for editing. Extending this to other host.yaml fields is
     a per-field tool call; the slice-B form pattern makes that cheap."""
-    pos, kv = parse_kv_args(parts)
+    pos, kv, err = parse_inline_args(parts)
+    if err:
+        return SlashResult(handled=True, ok=False, output=err)
     known = dict(kv)
     if pos:
         if len(pos) >= 1:
@@ -510,6 +591,9 @@ def cmd_host_edit(parts: list[str], ctx: SlashContext) -> SlashResult:
             known.setdefault("path", pos[1])
     if "host" not in known and ctx.active_host:
         known["host"] = ctx.active_host
+    guard = _reject_flaglike_values(known)
+    if guard:
+        return SlashResult(handled=True, ok=False, output=guard)
     fields = [
         FormField("host", "satellite host_id", required=True),
         FormField("path", "new watch root path", required=True, validator=_absolute_path),
@@ -523,13 +607,18 @@ def cmd_host_edit(parts: list[str], ctx: SlashContext) -> SlashResult:
 
 
 def cmd_env_install(parts: list[str], ctx: SlashContext) -> SlashResult:
-    pos, kv = parse_kv_args(parts)
+    pos, kv, err = parse_inline_args(parts)
+    if err:
+        return SlashResult(handled=True, ok=False, output=err)
     known = dict(kv)
     if pos:
         if len(pos) >= 1:
             known.setdefault("host", pos[0])
         if len(pos) >= 2:
             known.setdefault("project_id", pos[1])
+    guard = _reject_flaglike_values(known)
+    if guard:
+        return SlashResult(handled=True, ok=False, output=guard)
     fields = [
         FormField("host", "satellite host_id", required=True),
         FormField("project_id", "project id", required=True),
@@ -555,10 +644,15 @@ def cmd_env_install(parts: list[str], ctx: SlashContext) -> SlashResult:
 
 
 def cmd_where(parts: list[str], ctx: SlashContext) -> SlashResult:
-    pos, kv = parse_kv_args(parts)
+    pos, kv, err = parse_inline_args(parts)
+    if err:
+        return SlashResult(handled=True, ok=False, output=err)
     known = dict(kv)
     if pos:
         known.setdefault("query", " ".join(pos))
+    guard = _reject_flaglike_values(known)
+    if guard:
+        return SlashResult(handled=True, ok=False, output=guard)
     fields = [
         FormField("query", "alias name or path fragment", required=True),
     ]
@@ -708,10 +802,15 @@ def cmd_project_siblings(parts: list[str], ctx: SlashContext) -> SlashResult:
     active (or named) project. Helpful for the agent to discover what else
     is under the same research programme. No-op message when the project
     is top-level."""
-    pos, kv = parse_kv_args(parts)
+    pos, kv, err = parse_inline_args(parts)
+    if err:
+        return SlashResult(handled=True, ok=False, output=err)
     known = dict(kv)
     if pos:
         known.setdefault("project_id", pos[0])
+    guard = _reject_flaglike_values(known)
+    if guard:
+        return SlashResult(handled=True, ok=False, output=guard)
     project_id = known.get("project_id") or ctx.env.project_id
     if not project_id:
         return SlashResult(

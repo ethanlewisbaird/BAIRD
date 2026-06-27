@@ -13,6 +13,7 @@ import pytest
 from baird.agent_tools import ToolEnv
 from baird.slash import (
     SlashContext,
+    parse_inline_args,
     parse_kv_args,
     try_dispatch,
 )
@@ -87,6 +88,94 @@ def test_parse_kv_args_splits_positional_and_kv() -> None:
     pos, kv = parse_kv_args(["scrna", "name=scRNA", "github=me/scrna"])
     assert pos == ["scrna"]
     assert kv == {"name": "scRNA", "github": "me/scrna"}
+
+
+def test_parse_inline_args_generic_double_dash_flags() -> None:
+    """Issue #1: `--<field> <value>` must work for ANY field, not just --parent."""
+    pos, kv, err = parse_inline_args(
+        ["scrna", "--name", "scRNA", "--github", "me/x", "--locations", "h:/p"]
+    )
+    assert err is None
+    assert pos == ["scrna"]
+    assert kv == {"name": "scRNA", "github": "me/x", "locations": "h:/p"}
+
+
+def test_parse_inline_args_equals_form() -> None:
+    pos, kv, err = parse_inline_args(["p", "--name=Spatial", "--parent=scentinel"])
+    assert err is None
+    assert pos == ["p"]
+    assert kv == {"name": "Spatial", "parent": "scentinel"}
+
+
+def test_parse_inline_args_rejects_flag_value() -> None:
+    pos, kv, err = parse_inline_args(["--name", "--locations"])
+    assert err is not None and "flag-looking value" in err
+
+
+def test_parse_inline_args_rejects_dangling_flag() -> None:
+    pos, kv, err = parse_inline_args(["scrna", "--name"])
+    assert err is not None and "missing a value" in err
+
+
+# ---- /project new — generic --<field> support (issue #1) ----------------
+
+
+def test_project_new_inline_locations_double_dash_flag() -> None:
+    """The exact failing transcript from issue #1: --locations was being
+    swallowed into the positional `name` slot. Must land in `locations`."""
+    ctx, hub, _ = _ctx(answers=[])
+    hub.list_projects.return_value = [{"id": "scentinel", "name": "S"}]
+    hub.upsert_project.return_value = {"id": "scentinel-spatial"}
+    hub.add_project_location.return_value = []
+    r = try_dispatch(
+        "project new scentinel-spatial --parent scentinel "
+        "--locations GPU-wrkstn:/data-hdd0/Ethan_Baird/Dec25_xenium",
+        ctx,
+    )
+    assert r.handled and r.ok, r.output
+    hub.upsert_project.assert_called_once_with(
+        id="scentinel-spatial",
+        name="scentinel-spatial",
+        github=None,
+        parent_id="scentinel",
+    )
+    hub.add_project_location.assert_called_once_with(
+        "scentinel-spatial",
+        host="GPU-wrkstn",
+        path="/data-hdd0/Ethan_Baird/Dec25_xenium",
+        role=None,
+    )
+
+
+def test_project_new_inline_name_double_dash_flag() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.upsert_project.return_value = {"id": "p"}
+    r = try_dispatch("project new p --name 'Real Name'", ctx)
+    assert r.handled and r.ok, r.output
+    assert hub.upsert_project.call_args.kwargs["name"] == "Real Name"
+
+
+def test_project_new_inline_github_double_dash_flag() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.upsert_project.return_value = {"id": "p"}
+    r = try_dispatch("project new p --github org/repo", ctx)
+    assert r.handled and r.ok, r.output
+    assert hub.upsert_project.call_args.kwargs["github"] == "org/repo"
+
+
+def test_project_add_location_double_dash_flags() -> None:
+    """The generic flag parser must also serve /project add-location."""
+    ctx, hub, _ = _ctx(answers=[])
+    hub.add_project_location.return_value = [
+        {"host": "hibu", "path": "/data", "role": "data"}
+    ]
+    r = try_dispatch(
+        "project add-location scrna --host hibu --path /data --role data", ctx
+    )
+    assert r.handled and r.ok, r.output
+    hub.add_project_location.assert_called_once_with(
+        "scrna", host="hibu", path="/data", role="data"
+    )
 
 
 # ---- /project new ----------------------------------------------------
