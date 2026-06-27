@@ -58,6 +58,38 @@ def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
+def expand_project_ids(hub: HubClient, project_ids: list[str]) -> list[str]:
+    """Expand `runnable.project_ids` at fire time.
+
+    When an entry is a parent in the project hierarchy, replace it with its
+    children (cross-cutting tasks like "for each assay under SCENTINEL,
+    do X"). Leaf ids (no children) pass through unchanged. Order is
+    preserved and duplicates collapsed.
+
+    Decision: a parent id is REPLACED, not augmented. Including the parent
+    too would fire the umbrella's own conversation on every cross-cutting
+    run, which is rarely what these callers want — they can add the parent
+    id explicitly if they really do.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for pid in project_ids:
+        try:
+            kids = hub.list_children(pid)
+        except Exception:
+            kids = []
+        if kids:
+            for k in kids:
+                if k["id"] not in seen:
+                    out.append(k["id"])
+                    seen.add(k["id"])
+        else:
+            if pid not in seen:
+                out.append(pid)
+                seen.add(pid)
+    return out
+
+
 def next_fire_after(task: Task, after: dt.datetime) -> dt.datetime | None:
     """Compute the next scheduled fire time strictly after `after`.
 
@@ -287,17 +319,46 @@ class Scheduler:
         return _wrapped
 
     def _do_fire(self, task: Task) -> Any:
-        try:
-            return run_task_once(
-                task,
-                hub=self.hub,
-                model_client=self.model_client,
-                notifier=self.notifier,
-                host_id=self.host_id,
-            )
-        except Exception:
-            log.exception("task %s firing raised", task.id)
-            return None
+        # Multi-project tasks: when runnable.project_ids is set, resolve
+        # parent ids → children at fire time and run once per resolved id.
+        # Empty list (the common case) preserves the single-project firing
+        # path with whatever `runnable.project_id` was already configured.
+        pids = list(task.runnable.project_ids or [])
+        if not pids:
+            try:
+                return run_task_once(
+                    task,
+                    hub=self.hub,
+                    model_client=self.model_client,
+                    notifier=self.notifier,
+                    host_id=self.host_id,
+                )
+            except Exception:
+                log.exception("task %s firing raised", task.id)
+                return None
+
+        resolved = expand_project_ids(self.hub, pids)
+        results: list[Any] = []
+        for rpid in resolved:
+            sub_task = task.model_copy(deep=True)
+            sub_task.runnable.project_id = rpid
+            # Drop project_ids on the per-id firing to avoid recursive
+            # re-expansion if the runner ever inspects it.
+            sub_task.runnable.project_ids = []
+            try:
+                results.append(
+                    run_task_once(
+                        sub_task,
+                        hub=self.hub,
+                        model_client=self.model_client,
+                        notifier=self.notifier,
+                        host_id=self.host_id,
+                    )
+                )
+            except Exception:
+                log.exception("task %s firing for project %s raised", task.id, rpid)
+                results.append(None)
+        return results
 
     def _reschedule(self, task: Task, after: dt.datetime) -> dt.datetime:
         nf = next_fire_after(task, after)
