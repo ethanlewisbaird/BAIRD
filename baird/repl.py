@@ -157,6 +157,35 @@ def run_repl(
             continue
 
         if line.startswith("/"):
+            # First chance to handle: the hub-first slash registry in
+            # baird/slash.py (project/host/env/where/run on …). Returns None
+            # when the line doesn't match a registered verb, in which case
+            # the legacy REPL-internal commands below take a turn.
+            from .agent_tools import ToolEnv
+            from .slash import SlashContext, try_dispatch as _try_slash
+
+            slash_ctx = SlashContext(
+                hub=hub,
+                env=ToolEnv(hub=hub, project_id=config.project_id),
+                input_fn=input_fn if iterator is None else _iter_input_fn(iterator),
+                console=console,
+                active_host=getattr(config, "_active_host", None),
+            )
+            slash_res = _try_slash(line[1:], slash_ctx)
+            if slash_res is not None:
+                if slash_res.output:
+                    style = "green" if slash_res.ok else "red"
+                    console.print(f"[{style}]{slash_res.output}[/{style}]")
+                if slash_res.active_host:
+                    config._active_host = slash_res.active_host  # type: ignore[attr-defined]
+                if slash_res.switch_to_project:
+                    swapped = _switch_project(
+                        slash_res.switch_to_project, hub, config, host_id, console
+                    )
+                    if swapped[0] is not None:
+                        rendered, system, repo_ctx, session = swapped
+                continue
+
             cmd = line[1:].split()[0].lower()
             if cmd in {"exit", "quit"}:
                 break
@@ -299,9 +328,16 @@ def run_repl(
                     )
                 continue
             if cmd == "help":
+                from .slash import commands as _slash_cmds
+
                 console.print(
                     "[dim]/exit  /context  /reset  /cost  /model [id]  "
                     "/sessions  /project [id|new <id>]  /no-diff[/dim]"
+                )
+                console.print(
+                    "[dim]hub-first: "
+                    + "  ".join(f"/{c}" for c in _slash_cmds())
+                    + "[/dim]"
                 )
                 continue
             console.print(f"[red]unknown command:[/red] /{cmd} (try /help)")
@@ -411,6 +447,40 @@ def _one_turn(
         action.set_summary(first_line[:200])
 
     return completion
+
+
+def _switch_project(target_id, hub, config, host_id, console):
+    """Reload context/session for `target_id`. Used by /project switch and by
+    slash commands that signal `switch_to_project` (e.g. /project new)."""
+    from .context_loader import lite_repo_context
+    from .project_yaml import ProjectYaml
+
+    try:
+        proj_row = hub.get_project(target_id)
+    except Exception as e:
+        console.print(f"[red]project '{target_id}' not on hub:[/red] {e}")
+        return None, None, None, None
+    py = ProjectYaml(
+        id=proj_row["id"],
+        name=proj_row.get("name") or proj_row["id"],
+        github=proj_row.get("github"),
+        context=proj_row.get("context"),
+    )
+    repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
+    rendered = render_context(repo_ctx)
+    system = _system_prompt(rendered)
+    config.project_id = target_id
+    config.project_root = None
+    session = hub.find_or_create_session_for_task(
+        task_id=f"repl-{target_id}",
+        project_id=target_id,
+        mode="code",
+    )
+    console.print(
+        f"[yellow]switched to project[/yellow] {target_id}  "
+        f"session={session['id'][:8]}"
+    )
+    return rendered, system, repo_ctx, session
 
 
 def _iter_input_fn(iterator: Iterable[str]) -> Callable[[str], str]:

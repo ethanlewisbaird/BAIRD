@@ -225,6 +225,36 @@ def run_tui_repl(
                 continue
 
             if line.startswith("/"):
+                # First: try the hub-first slash registry (see baird/slash.py).
+                from .agent_tools import ToolEnv
+                from .slash import SlashContext
+                from .slash import try_dispatch as _try_slash
+
+                slash_ctx = SlashContext(
+                    hub=hub,
+                    env=ToolEnv(hub=hub, project_id=config.project_id),
+                    input_fn=_maybe_input,
+                    console=console,
+                    active_host=getattr(config, "_active_host", None),
+                )
+                slash_res = _try_slash(line[1:], slash_ctx)
+                if slash_res is not None:
+                    if slash_res.output:
+                        style = "green" if slash_res.ok else "red"
+                        _print(Text(slash_res.output, style=style))
+                    if slash_res.active_host:
+                        config._active_host = slash_res.active_host  # type: ignore[attr-defined]
+                    if slash_res.switch_to_project:
+                        from .repl import _switch_project
+
+                        swapped = _switch_project(
+                            slash_res.switch_to_project, hub, config, host_id, console
+                        )
+                        if swapped[0] is not None:
+                            rendered, system, repo_ctx, session = swapped
+                            console.print(_render_header(repo_ctx, host_id, session, config))
+                    continue
+
                 cmd = line[1:].split()[0].lower()
                 if cmd in {"exit", "quit"}:
                     break
@@ -326,9 +356,15 @@ def run_tui_repl(
                             ))
                     continue
                 if cmd == "help":
+                    from .slash import commands as _slash_cmds
+
                     _print(Text(
                         "/exit  /context  /reset  /cost  /model [id]  "
                         "/sessions  /project [id|new <id>]  /no-diff",
+                        style="dim",
+                    ))
+                    _print(Text(
+                        "hub-first: " + "  ".join(f"/{c}" for c in _slash_cmds()),
                         style="dim",
                     ))
                     continue
