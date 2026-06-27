@@ -14,6 +14,7 @@ the request dict and returning the response dict.
 
 from __future__ import annotations
 
+import json as _json
 import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -75,8 +76,17 @@ def make_hub_proxy_transport(
         headers["X-Baird-Action-Id"] = action_id
     url = hub_url.rstrip("/") + "/v1/proxy/chat/completions"
 
-    def _transport(req: dict[str, Any]) -> dict[str, Any]:
+    def _transport(req: dict[str, Any]):
         # We ignore `req["path"]` — the proxy URL is fixed.
+        if req.get("stream"):
+            def _stream():
+                with httpx.stream(
+                    "POST", url, headers=headers, json=req["body"], timeout=timeout
+                ) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        yield line
+            return _stream()
         r = httpx.post(url, headers=headers, json=req["body"], timeout=timeout)
         r.raise_for_status()
         return r.json()
@@ -175,6 +185,77 @@ class OpenRouterClient:
         raw = self._post("/chat/completions", body)
         return self._parse(model, raw)
 
+    def stream_complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        max_tokens: int = 1024,
+        temperature: float = 0.2,
+        system: str | None = None,
+        on_chunk: "Callable[[str], None] | None" = None,
+    ) -> Completion:
+        """Same as `complete`, but streams the response. Calls `on_chunk` for
+        every content delta as it arrives. Returns the final Completion once
+        the stream ends.
+
+        For a hub-proxy `transport=`, the transport receives the request and
+        returns an iterator yielding raw SSE bytes (newline-terminated lines).
+        For the default transport, this method calls OpenRouter directly with
+        `stream=True` over httpx.
+        """
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": self._build_messages(messages, system=system),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        chunks_iter = self._stream_post("/chat/completions", body)
+        # If the transport doesn't actually stream (returns a dict), parse it
+        # as a non-streaming response and call the callback once with the
+        # full content. Keeps tests with simple transports working.
+        if isinstance(chunks_iter, dict):
+            completion = self._parse(model, chunks_iter)
+            if on_chunk and completion.content:
+                on_chunk(completion.content)
+            return completion
+        content_parts: list[str] = []
+        usage: dict[str, Any] | None = None
+        try:
+            for line_bytes in chunks_iter:
+                line = (
+                    line_bytes.decode("utf-8", errors="replace")
+                    if isinstance(line_bytes, bytes) else line_bytes
+                )
+                line = line.rstrip("\n")
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    obj = _json.loads(payload)
+                except Exception:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("usage"):
+                    usage = obj["usage"]
+                for ch in obj.get("choices", []) or []:
+                    delta = (ch.get("delta") or {}).get("content")
+                    if delta:
+                        content_parts.append(delta)
+                        if on_chunk is not None:
+                            on_chunk(delta)
+        finally:
+            pass
+        raw_like = {
+            "choices": [{"message": {"content": "".join(content_parts)}}],
+            "usage": usage or {},
+        }
+        return self._parse(model, raw_like)
+
     # --- internals -------------------------------------------------------
 
     def _build_messages(
@@ -205,6 +286,35 @@ class OpenRouterClient:
             if r.status_code >= 400:
                 raise ModelError(f"openrouter {r.status_code}: {r.text[:500]}")
             return r.json()
+
+    def _stream_post(self, path: str, body: dict[str, Any]):
+        """Yield raw SSE lines. With a `transport`, the transport returns an
+        iterator. Without one, hits OpenRouter directly with `stream=True`."""
+        if self._transport is not None:
+            return self._transport({"path": path, "body": body, "stream": True})
+        if not self._key:
+            raise ModelError("OPENROUTER_API_KEY not set and no transport supplied")
+
+        def _gen():
+            with httpx.stream(
+                "POST",
+                f"{self.BASE}{path}",
+                headers={
+                    "Authorization": f"Bearer {self._key}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                    "HTTP-Referer": "https://github.com/ethanlewisbaird/BAIRD",
+                    "X-Title": "BAIRD",
+                },
+                json=body,
+                timeout=self._timeout,
+            ) as r:
+                if r.status_code >= 400:
+                    raise ModelError(f"openrouter {r.status_code}")
+                for line in r.iter_lines():
+                    yield line
+
+        return _gen()
 
     def _parse(self, model: str, raw: dict[str, Any]) -> Completion:
         try:

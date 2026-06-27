@@ -294,9 +294,14 @@ def _one_turn(
     config: ReplConfig,
     system: str,
     host_id: str | None,
+    on_chunk: Callable[[str], None] | None = None,
 ) -> Completion:
     """Append the user message, call the model with recent history, record an
-    Action with cost, append the assistant message. Returns the Completion."""
+    Action with cost, append the assistant message. Returns the Completion.
+
+    When `on_chunk` is set, calls `stream_complete` and reports partial
+    content via the callback as it arrives.
+    """
     with hub.start_action(
         project_id=config.project_id,
         tool_name="model",
@@ -316,13 +321,23 @@ def _one_turn(
         hub.append_message(session_id, role="user", content=user_msg)
         msgs.append({"role": "user", "content": user_msg})
 
-        completion = model_client.complete(
-            model=config.model,
-            messages=msgs,
-            max_tokens=config.max_tokens,
-            temperature=config.temperature,
-            system=system,
-        )
+        if on_chunk is not None:
+            completion = model_client.stream_complete(
+                model=config.model,
+                messages=msgs,
+                max_tokens=config.max_tokens,
+                temperature=config.temperature,
+                system=system,
+                on_chunk=on_chunk,
+            )
+        else:
+            completion = model_client.complete(
+                model=config.model,
+                messages=msgs,
+                max_tokens=config.max_tokens,
+                temperature=config.temperature,
+                system=system,
+            )
 
         hub.append_message(session_id, role="assistant", content=completion.content)
         action.record_usage(

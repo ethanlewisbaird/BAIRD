@@ -205,6 +205,14 @@ def run_tui_repl(
 
             _print(Text(f"user> {line}", style="bold cyan"))
 
+            # Streaming: append a placeholder Text the chunks accumulate into.
+            stream_buf = Text()
+            panel_log.append(stream_buf)
+
+            def _on_chunk(delta: str) -> None:
+                stream_buf.append(delta)
+                _refresh(live)
+
             try:
                 completion = _one_turn(
                     user_msg=line,
@@ -214,12 +222,17 @@ def run_tui_repl(
                     config=config,
                     system=system,
                     host_id=host_id,
+                    on_chunk=_on_chunk,
                 )
             except ModelError as e:
                 _print(Text(f"model error: {e}", style="red"))
                 continue
-
-            _print(Text(completion.content))
+            # Stream buffer holds the full content already; no extra _print
+            # for the message body. (Falls back gracefully if streaming
+            # transport doesn't actually stream — buffer ends up empty and
+            # we render completion.content below.)
+            if not str(stream_buf):
+                stream_buf.append(completion.content)
             _print(Text(
                 f"model={completion.model}  "
                 f"tokens={completion.usage.input_tokens}→{completion.usage.output_tokens}  "
