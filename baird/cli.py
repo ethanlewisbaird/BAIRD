@@ -182,6 +182,8 @@ def code(
                 name=proj_row.get("name") or proj_row["id"],
                 github=proj_row.get("github"),
                 context=proj_row.get("context"),
+                parent_id=proj_row.get("parent_id")
+                or (proj_row.get("config") or {}).get("parent_id"),
             )
             ctx = lite_repo_context(py, hub=hub)
     elif has_local:

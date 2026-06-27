@@ -302,6 +302,8 @@ def run_repl(
                     name=proj_row.get("name") or proj_row["id"],
                     github=proj_row.get("github"),
                     context=proj_row.get("context"),
+                    parent_id=proj_row.get("parent_id")
+                    or (proj_row.get("config") or {}).get("parent_id"),
                 )
                 repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
                 rendered = render_context(repo_ctx)
@@ -472,6 +474,8 @@ def _switch_project(target_id, hub, config, host_id, console):
         name=proj_row.get("name") or proj_row["id"],
         github=proj_row.get("github"),
         context=proj_row.get("context"),
+        parent_id=proj_row.get("parent_id")
+        or (proj_row.get("config") or {}).get("parent_id"),
     )
     repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
     rendered = render_context(repo_ctx)
