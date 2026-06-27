@@ -850,11 +850,29 @@ def research(
     query: str = typer.Argument(...),
     project: str | None = typer.Option(None, "--project"),
     model: str = typer.Option("anthropic/claude-3-haiku", "--model"),
+    no_mcp: bool = typer.Option(
+        False, "--no-mcp", help="Skip configured MCP servers; web search only."
+    ),
 ) -> None:
-    """Run one research cycle for `query` and write the brief to the inbox."""
+    """Run one research cycle for `query` and write the brief to the inbox.
+
+    Uses any MCP servers configured in `~/.baird/mcp_servers.yaml` alongside
+    the default Tavily web search. The planner picks per-sub-query which tool
+    to use; use `--no-mcp` to stay on web only.
+    """
     from .model import OpenRouterClient
     from .notifier import Notifier
     from .research import run_research
+
+    mcp_servers = None
+    if not no_mcp:
+        from .mcp_client import load_servers
+        mcp_servers = load_servers()
+        if mcp_servers:
+            console.print(
+                f"[dim]MCP: {len(mcp_servers)} server(s) available "
+                f"({', '.join(s.id for s in mcp_servers)})[/dim]"
+            )
 
     with _hub_client_from_host() as hub:
         notifier = Notifier(hub=hub, telegram=None)
@@ -865,6 +883,7 @@ def research(
             notifier=notifier,
             project_id=project,
             model=model,
+            mcp_servers=mcp_servers,
         )
     console.print(res.synthesis)
     console.print(
@@ -954,6 +973,83 @@ def emit(
 
 files_app = typer.Typer(help="File lineage + registry helpers")
 app.add_typer(files_app, name="files")
+
+mcp_app = typer.Typer(help="Manage MCP servers used by `baird research`")
+app.add_typer(mcp_app, name="mcp")
+
+
+@mcp_app.command("list")
+def mcp_list() -> None:
+    """Show MCP servers configured in ~/.baird/mcp_servers.yaml + a tool count
+    per server (lazy probes each)."""
+    from rich.table import Table
+
+    from .mcp_client import list_tools, load_servers
+
+    servers = load_servers()
+    if not servers:
+        console.print(
+            "[dim]no MCP servers configured. Add some to "
+            f"{Path('~/.baird/mcp_servers.yaml').expanduser()}[/dim]"
+        )
+        return
+    t = Table(title="MCP servers")
+    t.add_column("id"); t.add_column("command"); t.add_column("tools"); t.add_column("description")
+    for s in servers:
+        try:
+            n = str(len(list_tools(s, timeout=5.0)))
+        except Exception:
+            n = "?"
+        t.add_row(s.id, f"{s.command} {' '.join(s.args)}", n, s.description or "")
+    console.print(t)
+
+
+@mcp_app.command("tools")
+def mcp_tools(server_id: str = typer.Argument(...)) -> None:
+    """List tools exposed by one MCP server."""
+    from .mcp_client import find_server, list_tools
+
+    spec = find_server(server_id)
+    if spec is None:
+        console.print(f"[red]no MCP server {server_id}[/red]")
+        raise typer.Exit(1)
+    for t in list_tools(spec):
+        console.print(f"[cyan]{t.name}[/cyan]  [dim]{t.description}[/dim]")
+
+
+@mcp_app.command("call")
+def mcp_call(
+    server_id: str = typer.Argument(...),
+    tool: str = typer.Argument(...),
+    args: str = typer.Option("{}", "--args", help="JSON arguments dict"),
+) -> None:
+    """One-shot tool call for debugging."""
+    import json as _json
+
+    from .mcp_client import call_tool, find_server
+
+    spec = find_server(server_id)
+    if spec is None:
+        console.print(f"[red]no MCP server {server_id}[/red]")
+        raise typer.Exit(1)
+    out = call_tool(spec, tool, _json.loads(args))
+    console.print(out or "[dim](empty result)[/dim]")
+
+
+@mcp_app.command("ping")
+def mcp_ping(server_id: str = typer.Argument(...)) -> None:
+    """Reachability check for one server."""
+    from .mcp_client import find_server, ping
+
+    spec = find_server(server_id)
+    if spec is None:
+        console.print(f"[red]no MCP server {server_id}[/red]")
+        raise typer.Exit(1)
+    if ping(spec):
+        console.print(f"[green]ok[/green] {server_id} responded")
+    else:
+        console.print(f"[red]down[/red] {server_id} did not respond")
+        raise typer.Exit(1)
 
 
 # ----- recall flag / resolve -----

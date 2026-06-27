@@ -93,6 +93,23 @@ search-engine queries that together cover the question. Return strictly JSON:
 """
 
 
+PLAN_WITH_TOOLS_SYSTEM = """\
+You are BAIRD's research planner. You have these search tools available:
+
+{tool_list}
+
+Decompose the user's query into 3-5 specific (sub_query, tool) pairs that
+together cover the question. Pick the most appropriate tool for each
+sub-query — use web for general / current-events questions, use the named
+MCP tools for domain-specific lookups (PubMed for peer-reviewed papers,
+bioRxiv for preprints, etc.).
+
+Return strictly JSON:
+
+{{"queries": [{{"q": "...", "tool": "web|<server_id>.<tool_name>"}}, ...]}}
+"""
+
+
 SYNTH_SYSTEM = """\
 You are BAIRD's research synthesizer. Given the user's original query and a
 list of web search snippets, write a concise markdown brief (under 500 words):
@@ -117,13 +134,20 @@ def run_research(
     model_client: OpenRouterClient,
     notifier: Notifier | None = None,
     web_search: WebSearchFn = tavily_search,
+    mcp_servers: list[Any] | None = None,
     project_id: str | None = None,
     host_id: str | None = None,
     model: str = "anthropic/claude-3-haiku",
     per_query_results: int = 5,
     max_subqueries: int = 5,
 ) -> ResearchResult:
-    """Fire one research cycle. Always writes an inbox row at the end."""
+    """Fire one research cycle. Always writes an inbox row at the end.
+
+    `mcp_servers` is a list of `ServerSpec` (from baird.mcp_client). When
+    present, the planner picks a tool per sub-query (web vs. a specific
+    MCP tool) and the gather phase routes accordingly. Falls back to the
+    web-only planner when the MCP list is empty.
+    """
     with hub.start_action(
         project_id=project_id,
         tool_name="research",
@@ -131,29 +155,60 @@ def run_research(
         host=host_id,
         model_name=model,
     ) as action:
+        # Resolve MCP tools up-front so the planner sees what's available.
+        mcp_tools: list[dict[str, str]] = []
+        if mcp_servers:
+            from . import mcp_client as _mcp
+            for spec in mcp_servers:
+                for t in _mcp.list_tools(spec):
+                    mcp_tools.append({
+                        "id": f"{spec.id}.{t.name}",
+                        "description": t.description[:120] or "(no description)",
+                    })
+
         # Plan.
-        plan_resp = model_client.complete(
-            model=model,
-            messages=[{"role": "user", "content": query}],
-            system=PLAN_SYSTEM,
-            max_tokens=512,
-        )
+        if mcp_tools:
+            tool_list = "  web — general web search (Tavily)\n" + "\n".join(
+                f"  {t['id']} — {t['description']}" for t in mcp_tools
+            )
+            plan_system = PLAN_WITH_TOOLS_SYSTEM.format(tool_list=tool_list)
+            plan_resp = model_client.complete(
+                model=model,
+                messages=[{"role": "user", "content": query}],
+                system=plan_system,
+                max_tokens=768,
+            )
+            routed = _parse_routed_subqueries(plan_resp.content)[:max_subqueries]
+        else:
+            plan_resp = model_client.complete(
+                model=model,
+                messages=[{"role": "user", "content": query}],
+                system=PLAN_SYSTEM,
+                max_tokens=512,
+            )
+            routed = [(sq, "web") for sq in _parse_subqueries(plan_resp.content)[:max_subqueries]]
+
         action.record_usage(
             cost_usd=plan_resp.cost_usd,
             input_tokens=plan_resp.usage.input_tokens,
             output_tokens=plan_resp.usage.output_tokens,
         )
-        sub_queries = _parse_subqueries(plan_resp.content)[:max_subqueries]
-        if not sub_queries:
-            sub_queries = [query]
+        if not routed:
+            routed = [(query, "web")]
 
-        # Gather.
+        # Gather. Each (sub_query, tool) is routed to either web search or
+        # an MCP tool call.
         all_hits: list[dict[str, str]] = []
-        for sq in sub_queries:
-            hits = web_search(sq, per_query_results)
+        for sq, tool in routed:
+            if tool == "web":
+                hits = web_search(sq, per_query_results)
+            else:
+                hits = _call_mcp_tool(tool, sq, mcp_servers or [])
             for h in hits:
                 h["_for"] = sq
+                h.setdefault("_via", tool)
             all_hits.extend(hits)
+        sub_queries = [sq for sq, _ in routed]
 
         # Synthesize.
         if all_hits:
@@ -219,6 +274,61 @@ def _parse_subqueries(content: str) -> list[str]:
         return []
     out = data.get("sub_queries") or []
     return [s for s in out if isinstance(s, str) and s.strip()]
+
+
+def _parse_routed_subqueries(content: str) -> list[tuple[str, str]]:
+    """Parse {"queries": [{"q": "...", "tool": "..."}]}. Returns
+    [(q, tool)] pairs. Empty list on malformed input."""
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    out: list[tuple[str, str]] = []
+    for q in data.get("queries", []) or []:
+        if isinstance(q, dict):
+            sq = q.get("q") or q.get("query")
+            tool = q.get("tool", "web")
+            if isinstance(sq, str) and sq.strip():
+                out.append((sq.strip(), str(tool)))
+    return out
+
+
+def _call_mcp_tool(
+    tool_id: str, query: str, specs: list[Any]
+) -> list[dict[str, str]]:
+    """Call an MCP tool like `pubmed.search_articles` with `{"query": q}`.
+    Returns a list of {title, url, snippet} dicts compatible with web hits.
+    Empty list on any failure."""
+    if "." not in tool_id:
+        return []
+    server_id, tool_name = tool_id.split(".", 1)
+    spec = next((s for s in specs if s.id == server_id), None)
+    if spec is None:
+        return []
+    from . import mcp_client as _mcp
+
+    # Most MCP search tools take a `query` arg. Try a few common names.
+    for arg_name in ("query", "q", "search", "term"):
+        out = _mcp.call_tool(spec, tool_name, {arg_name: query})
+        if out:
+            break
+    else:
+        out = _mcp.call_tool(spec, tool_name, {"query": query})
+    if not out:
+        return []
+    return [{
+        "title": f"{server_id}:{tool_name}",
+        "url": f"mcp://{tool_id}",
+        "snippet": out[:1500],
+    }]
 
 
 def _render_corpus(query: str, sub_queries: list[str], hits: list[dict[str, str]]) -> str:

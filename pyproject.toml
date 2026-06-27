@@ -40,6 +40,11 @@ recall = [
     "sentence-transformers>=3.0",
     "pyarrow>=14.0",
 ]
+# MCP servers wired into `baird research` (and eventually `baird code`).
+# Optional — without it, /research falls back to the Tavily web path only.
+mcp = [
+    "mcp>=1.0",
+]
 
 [project.scripts]
 baird = "baird.cli:app"
