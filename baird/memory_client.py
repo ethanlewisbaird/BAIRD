@@ -117,6 +117,7 @@ class HubClient:
         name: str,
         github: str | None = None,
         context: str | None = None,
+        parent_id: str | None = None,
         config: dict[str, Any] | None = None,
     ) -> dict:
         r = self._client.post(
@@ -126,6 +127,7 @@ class HubClient:
                 "name": name,
                 "github": github,
                 "context": context,
+                "parent_id": parent_id,
                 "config": config or {},
             },
         )
@@ -139,6 +141,12 @@ class HubClient:
 
     def list_projects(self) -> list[dict]:
         r = self._client.get("/projects")
+        r.raise_for_status()
+        return r.json()
+
+    def list_children(self, project_id: str) -> list[dict]:
+        """List immediate children of a project (one-level hierarchy)."""
+        r = self._client.get(f"/projects/{project_id}/children")
         r.raise_for_status()
         return r.json()
 

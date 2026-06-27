@@ -44,6 +44,9 @@ class ProjectIn(BaseModel):
     name: str
     github: Optional[str] = None
     context: Optional[str] = None
+    # Optional one-level parent — see project_baird_subprojects.md. The hub
+    # mirrors this into `config["parent_id"]` so we don't add a column.
+    parent_id: Optional[str] = None
     config: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -231,14 +234,42 @@ def _read_locations(cfg: dict[str, Any]) -> list[LocationOut]:
 
 
 def _project_out(row: Project) -> ProjectOut:
+    cfg = row.config or {}
     return ProjectOut(
         id=row.id,
         name=row.name,
         github=row.github,
         context=row.context,
-        config=row.config or {},
+        parent_id=cfg.get("parent_id"),
+        config=cfg,
         created_at=row.created_at,
     )
+
+
+def _validate_parent_id(s: Session, *, child_id: str, parent_id: str) -> None:
+    """Enforce the one-level parent rule (see project_baird_subprojects.md):
+    parent must exist, parent must not itself have a parent, no self-reference.
+    Raises HTTPException on violation."""
+    if parent_id == child_id:
+        raise HTTPException(400, "parent_id cannot reference the project itself")
+    parent = s.get(Project, parent_id)
+    if parent is None:
+        raise HTTPException(400, f"parent project {parent_id!r} does not exist")
+    grandparent = (parent.config or {}).get("parent_id")
+    if grandparent:
+        raise HTTPException(
+            400,
+            f"parent project {parent_id!r} is itself a child of "
+            f"{grandparent!r} — hierarchy is one level only, no grandchildren.",
+        )
+
+
+def _children_of(s: Session, parent_id: str) -> list[Project]:
+    """Return projects whose `config["parent_id"]` matches. SQLite has JSON1
+    everywhere modern, but we keep the cross-engine path: load all + filter
+    in Python (the project table stays small — dozens, not thousands)."""
+    rows = s.scalars(select(Project)).all()
+    return [r for r in rows if (r.config or {}).get("parent_id") == parent_id]
 
 
 # ----- Route registration ------------------------------------------------
@@ -250,6 +281,18 @@ def register_routes(app: FastAPI) -> None:
 
     @app.post("/projects", response_model=ProjectOut)
     def upsert_project(payload: ProjectIn, s: Session = Depends(get_memory)) -> ProjectOut:
+        # Resolve parent_id from either the first-class field or
+        # `config["parent_id"]` — older callers (project.yaml round-trips)
+        # may stuff it under config.
+        cfg = dict(payload.config or {})
+        parent_id = payload.parent_id if payload.parent_id is not None else cfg.get("parent_id")
+        if parent_id is not None and parent_id != "":
+            _validate_parent_id(s, child_id=payload.id, parent_id=parent_id)
+            cfg["parent_id"] = parent_id
+        else:
+            cfg.pop("parent_id", None)
+            parent_id = None
+
         row = s.get(Project, payload.id)
         if row is None:
             row = Project(
@@ -257,17 +300,36 @@ def register_routes(app: FastAPI) -> None:
                 name=payload.name,
                 github=payload.github,
                 context=payload.context,
-                config=payload.config,
+                config=cfg,
             )
             s.add(row)
         else:
+            # Disallow retroactively setting a parent on a project that
+            # already has children — that would create grandchildren.
+            existing_parent = (row.config or {}).get("parent_id")
+            if parent_id is not None and parent_id != existing_parent:
+                kids = _children_of(s, payload.id)
+                if kids:
+                    raise HTTPException(
+                        400,
+                        f"cannot set parent_id on {payload.id!r}: it already has "
+                        f"{len(kids)} child project(s) — one-level rule.",
+                    )
             row.name = payload.name
             row.github = payload.github
             row.context = payload.context
-            row.config = payload.config
+            row.config = cfg
         s.commit()
         s.refresh(row)
         return _project_out(row)
+
+    @app.get("/projects/{project_id}/children", response_model=list[ProjectOut])
+    def list_project_children(
+        project_id: str, s: Session = Depends(get_memory)
+    ) -> list:
+        if s.get(Project, project_id) is None:
+            raise HTTPException(404, "project not found")
+        return [_project_out(r) for r in _children_of(s, project_id)]
 
     @app.get("/projects", response_model=list[ProjectOut])
     def list_projects(s: Session = Depends(get_memory)) -> list:
