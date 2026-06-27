@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from baird.config import HubConfig
 from baird.memory_client import HubClient
 from baird.model import OpenRouterClient
-from baird.scheduler import Scheduler, next_fire_after
+from baird.scheduler import Scheduler, expand_project_ids, next_fire_after
 from baird.tasks import (
     Budget,
     CronTrigger,
@@ -166,3 +166,165 @@ def test_in_flight_task_does_not_re_fire(client: TestClient) -> None:
     th.join(timeout=2.0)
 
     assert fire_counter["n"] == 1
+
+
+# ---- expand_project_ids ----------------------------------------------
+
+
+def test_expand_project_ids_replaces_parent_with_children(client: TestClient) -> None:
+    hub = _Hub(client)
+    client.post("/projects", json={"id": "scentinel", "name": "S"})
+    client.post(
+        "/projects",
+        json={"id": "scentinel-scrna", "name": "scRNA", "parent_id": "scentinel"},
+    )
+    client.post(
+        "/projects",
+        json={"id": "scentinel-spatial", "name": "spatial", "parent_id": "scentinel"},
+    )
+    out = expand_project_ids(hub, ["scentinel"])
+    assert sorted(out) == ["scentinel-scrna", "scentinel-spatial"]
+
+
+def test_expand_project_ids_leaves_leaf_ids_alone(client: TestClient) -> None:
+    hub = _Hub(client)
+    client.post("/projects", json={"id": "leaf", "name": "leaf"})
+    out = expand_project_ids(hub, ["leaf"])
+    assert out == ["leaf"]
+
+
+def test_expand_project_ids_explicit_list_no_expansion(client: TestClient) -> None:
+    """When the caller already supplies a list of leaves, even though
+    they happen to share a parent, expand returns them as-is — no
+    re-expansion."""
+    hub = _Hub(client)
+    client.post("/projects", json={"id": "u", "name": "u"})
+    client.post("/projects", json={"id": "a", "name": "a", "parent_id": "u"})
+    client.post("/projects", json={"id": "b", "name": "b", "parent_id": "u"})
+    out = expand_project_ids(hub, ["a", "b"])
+    assert out == ["a", "b"]
+
+
+def test_expand_project_ids_mixed_parent_and_leaf(client: TestClient) -> None:
+    """Parents expand; standalone leaves pass through. Duplicates are dedup'd
+    (children appearing after a sibling leaf with the same id)."""
+    hub = _Hub(client)
+    client.post("/projects", json={"id": "u", "name": "u"})
+    client.post("/projects", json={"id": "a", "name": "a", "parent_id": "u"})
+    client.post("/projects", json={"id": "standalone", "name": "s"})
+    out = expand_project_ids(hub, ["u", "standalone", "a"])
+    # `u` expands to ["a"]; then "standalone"; then "a" — already seen, dropped.
+    assert out == ["a", "standalone"]
+
+
+def test_expand_project_ids_empty_list() -> None:
+    """Pure helper — empty in, empty out, no hub call needed."""
+    out = expand_project_ids(hub=None, project_ids=[])  # type: ignore[arg-type]
+    assert out == []
+
+
+# ---- Multi-project firing --------------------------------------------
+
+
+def test_multi_project_task_fires_once_per_resolved_id(
+    client: TestClient, monkeypatch
+) -> None:
+    """Slice E integration: when runnable.project_ids contains a parent,
+    _do_fire substitutes runnable.project_id with each child and invokes
+    run_task_once once per id. We monkeypatch run_task_once with a recorder
+    so we don't depend on model/session machinery — the property under
+    test is the per-id dispatch, not what each firing does internally."""
+    hub = _Hub(client)
+    client.post("/projects", json={"id": "scentinel", "name": "SCENTINEL"})
+    client.post(
+        "/projects",
+        json={"id": "scentinel-scrna", "name": "scRNA", "parent_id": "scentinel"},
+    )
+    client.post(
+        "/projects",
+        json={"id": "scentinel-spatial", "name": "spatial", "parent_id": "scentinel"},
+    )
+
+    fired_pids: list[str] = []
+
+    def _recorder(task, **kwargs):
+        fired_pids.append(task.runnable.project_id or "")
+        return None
+
+    monkeypatch.setattr("baird.scheduler.run_task_once", _recorder)
+
+    task = Task(
+        id="cross-cut",
+        trigger=IntervalTrigger(interval_seconds=60),
+        runnable=Runnable(
+            prompt="hi",
+            model="anthropic/claude-3-haiku",
+            project_ids=["scentinel"],
+        ),
+        budget=Budget(max_cost_usd=1.0),
+    )
+
+    sched = Scheduler(
+        hub=hub,
+        model_client=_model_client(),
+        hub_cfg=HubConfig(daily_total_usd=10.0),
+        max_workers=1,
+        tick_seconds=0.05,
+    )
+    sched.set_tasks({"cross-cut": task})
+    sched._entries["cross-cut"].next_fire = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+    )
+
+    import threading
+    th = threading.Thread(target=sched.run, daemon=True)
+    th.start()
+    time.sleep(0.4)
+    sched.stop()
+    th.join(timeout=2.0)
+
+    # One firing per child; parent itself replaced.
+    assert sorted(fired_pids) == ["scentinel-scrna", "scentinel-spatial"]
+
+
+def test_single_project_task_unchanged_when_project_ids_empty(
+    client: TestClient, monkeypatch
+) -> None:
+    """Regression guard: tasks that don't use project_ids keep firing
+    exactly once with their existing runnable.project_id (no expansion)."""
+    hub = _Hub(client)
+    client.post("/projects", json={"id": "p", "name": "p"})
+
+    fired: list[str] = []
+
+    def _recorder(task, **kwargs):
+        fired.append(task.runnable.project_id or "")
+        return None
+
+    monkeypatch.setattr("baird.scheduler.run_task_once", _recorder)
+
+    task = Task(
+        id="single",
+        trigger=IntervalTrigger(interval_seconds=60),
+        runnable=Runnable(prompt="hi", project_id="p"),
+        budget=Budget(max_cost_usd=1.0),
+    )
+    sched = Scheduler(
+        hub=hub, model_client=_model_client(),
+        hub_cfg=HubConfig(daily_total_usd=10.0),
+        tick_seconds=0.05,
+    )
+    sched.set_tasks({"single": task})
+    sched._entries["single"].next_fire = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+    )
+    import threading
+    th = threading.Thread(target=sched.run, daemon=True)
+    th.start()
+    time.sleep(0.3)
+    sched.stop()
+    th.join(timeout=2.0)
+
+    assert fired == ["p"]
+
+

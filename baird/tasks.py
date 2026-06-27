@@ -66,6 +66,13 @@ class Runnable(BaseModel):
     model: str = "anthropic/claude-3-haiku"
     system: str | None = None
     project_id: str | None = None
+    # Multi-project tasks: when set, the scheduler resolves this list at fire
+    # time and runs the task once per resolved id. Any entry that is a
+    # parent in the project hierarchy gets expanded to that parent's children
+    # (cross-cutting tasks like "for each assay under SCENTINEL, do X"). An
+    # explicit list of leaf ids runs only against those. When both fields
+    # are set, `project_ids` wins; `project_id` stays for back-compat.
+    project_ids: list[str] = Field(default_factory=list)
     context_sources: list[str] = Field(default_factory=list)  # e.g. ["repo", "decisions", "rules"]
     max_tokens: int = 1024
     temperature: float = 0.2

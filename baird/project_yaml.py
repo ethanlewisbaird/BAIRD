@@ -71,6 +71,12 @@ class ProjectYaml(BaseModel):
     name: str
     github: str | None = None
     context: str | None = None
+    # Optional parent in the one-level hierarchy (umbrella → assays). A project
+    # is either a parent OR a child, not both — see
+    # `project_baird_subprojects.md`. Hub-side validation enforces "no
+    # grandchildren" and "cannot retroactively reparent a project that already
+    # has children".
+    parent_id: str | None = None
     checkout_hosts: list[CheckoutHost] = Field(default_factory=list)
     locations: list[Location] = Field(default_factory=list)
     goals: list[Goal] = Field(default_factory=list)

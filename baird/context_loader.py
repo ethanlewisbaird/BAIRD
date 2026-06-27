@@ -44,6 +44,21 @@ DEFAULT_TOKEN_BUDGET = 6000
 
 
 @dataclass
+class ParentContext:
+    """The inherited slice of a parent project's memory that flows into a
+    child's context block. Only `context` + active `goals` flow down;
+    `data_aliases` and `rules` stay scoped per-project on purpose (see
+    project_baird_subprojects.md). Sibling ids are surfaced too so the
+    model knows what other assays live under the same umbrella."""
+
+    id: str
+    name: str
+    context: str | None
+    active_goals: list[str] = field(default_factory=list)
+    sibling_ids: list[tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
 class RepoContext:
     project: ProjectYaml
     project_root: Path | None
@@ -57,6 +72,7 @@ class RepoContext:
     rules_summary: list[str] = field(default_factory=list)
     host_id: str | None = None
     locations: list[Location] = field(default_factory=list)
+    parent: ParentContext | None = None
 
 
 # ---- Gather helpers ----------------------------------------------------
@@ -158,6 +174,44 @@ def _load_locations(project: ProjectYaml, hub: HubClient | None) -> list[Locatio
     return effective_locations(project)
 
 
+def _load_parent_context(
+    project: ProjectYaml, hub: HubClient | None
+) -> ParentContext | None:
+    """If `project` has a `parent_id`, fetch the parent's name + context +
+    active goals + sibling ids. Returns None when there's no parent or the
+    hub is unreachable. Inheritance scope: context + active goals only —
+    NOT data_aliases or rules (see project_baird_subprojects.md)."""
+    if hub is None or not project.parent_id:
+        return None
+    try:
+        parent = hub.get_project(project.parent_id)
+    except Exception:
+        return None
+    cfg = parent.get("config") or {}
+    # The hub stores goals inside config (same JSON bucket as locations).
+    raw_goals = cfg.get("goals") or []
+    active = [
+        g.get("text") or g.get("id", "")
+        for g in raw_goals
+        if isinstance(g, dict) and g.get("status", "active") not in {"done", "abandoned"}
+    ]
+    siblings: list[tuple[str, str]] = []
+    try:
+        for s in hub.list_children(project.parent_id):
+            if s["id"] == project.id:
+                continue
+            siblings.append((s["id"], s.get("name") or s["id"]))
+    except Exception:
+        pass
+    return ParentContext(
+        id=parent["id"],
+        name=parent.get("name") or parent["id"],
+        context=parent.get("context"),
+        active_goals=[g for g in active if g],
+        sibling_ids=sorted(siblings),
+    )
+
+
 def _rules_summary(project: ProjectYaml) -> list[str]:
     return [f"[{r.severity}] {r.id}: {r.description}" for r in project.rules]
 
@@ -213,6 +267,7 @@ def load_repo_context(
         rules_summary=_rules_summary(project),
         host_id=host_id or os.uname().nodename,
         locations=_load_locations(project, hub),
+        parent=_load_parent_context(project, hub),
     )
 
 
@@ -255,6 +310,7 @@ def lite_repo_context(
         rules_summary=_rules_summary(project),
         host_id=host_id or os.uname().nodename,
         locations=_load_locations(project, hub),
+        parent=_load_parent_context(project, hub),
     )
 
 
@@ -305,6 +361,27 @@ def render_context(ctx: RepoContext, *, token_budget: int = DEFAULT_TOKEN_BUDGET
     )
 
     sections.append(("context", f"## Context\n\n{ctx.project.context or '(no context paragraph)'}"))
+
+    if ctx.parent is not None:
+        # Inherited slice from the umbrella project. Scope is deliberate:
+        # context + active goals only — NOT data_aliases or rules.
+        parent_lines: list[str] = [
+            f"## Parent ({ctx.parent.name})",
+            "",
+            "*(inherited from parent — context + active goals only; "
+            "rules and data_aliases stay scoped per project)*",
+            "",
+            ctx.parent.context or "(no parent context paragraph)",
+        ]
+        if ctx.parent.active_goals:
+            parent_lines.append("")
+            parent_lines.append("**Active goals (parent):**")
+            parent_lines.extend(f"- {g}" for g in ctx.parent.active_goals)
+        if ctx.parent.sibling_ids:
+            parent_lines.append("")
+            sibs = ", ".join(f"`{sid}` ({sname})" for sid, sname in ctx.parent.sibling_ids)
+            parent_lines.append(f"**Sibling projects:** {sibs}")
+        sections.append(("parent", "\n".join(parent_lines)))
 
     if ctx.locations:
         loc_lines = [

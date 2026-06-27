@@ -107,9 +107,32 @@ def _parse_locations_spec(spec: str) -> list[tuple[str, str]]:
     return out
 
 
+def _pluck_flag(parts: list[str], flag: str) -> tuple[list[str], str | None]:
+    """Extract `--<flag> <value>` (two tokens) from parts. Returns the
+    remaining tokens and the value (or None if absent). `--flag=value`
+    one-token form already round-trips through parse_kv_args, so we don't
+    handle it here."""
+    out: list[str] = []
+    value: str | None = None
+    i = 0
+    while i < len(parts):
+        if parts[i] == f"--{flag}" and i + 1 < len(parts):
+            value = parts[i + 1]
+            i += 2
+            continue
+        out.append(parts[i])
+        i += 1
+    return out, value
+
+
 def cmd_project_new(parts: list[str], ctx: SlashContext) -> SlashResult:
+    # `/project new <id> --parent <pid>` shorthand → lift the two-token
+    # `--parent X` form into the kv map before generic parsing.
+    parts, parent_flag = _pluck_flag(parts, "parent")
     pos, kv = parse_kv_args(parts)
     known: dict[str, str] = dict(kv)
+    if parent_flag is not None:
+        known.setdefault("parent", parent_flag)
     if pos:
         known.setdefault("id", pos[0])
         if len(pos) > 1:
@@ -119,17 +142,34 @@ def cmd_project_new(parts: list[str], ctx: SlashContext) -> SlashResult:
         FormField("name", "human-readable name", required=False),
         FormField("github", "GitHub repo (owner/name)", required=False),
         FormField(
+            "parent",
+            "parent project id (empty for top-level)",
+            required=False,
+        ),
+        FormField(
             "locations",
             "locations (host:path[,host:path...]) — empty to add later",
             required=False,
         ),
     ]
     vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
-    result = ctx.hub.upsert_project(
-        id=vals["id"],
-        name=vals.get("name") or vals["id"],
-        github=vals.get("github") or None,
-    )
+    parent_id: str | None = (vals.get("parent") or "").strip() or None
+    if parent_id is not None:
+        canonical_parent, perr = _resolve_parent_project(parent_id, ctx)
+        if canonical_parent is None:
+            return SlashResult(handled=True, ok=False, output=perr or "unknown parent")
+        parent_id = canonical_parent
+    try:
+        result = ctx.hub.upsert_project(
+            id=vals["id"],
+            name=vals.get("name") or vals["id"],
+            github=vals.get("github") or None,
+            parent_id=parent_id,
+        )
+    except Exception as e:
+        return SlashResult(
+            handled=True, ok=False, output=f"failed to create project: {e}"
+        )
     pid = result["id"]
     added: list[tuple[str, str]] = []
     for host, path in _parse_locations_spec(vals.get("locations", "")):
@@ -162,6 +202,43 @@ def cmd_project_new(parts: list[str], ctx: SlashContext) -> SlashResult:
         handled=True,
         output=f"created project {pid}{extra}{enrich_note}",
         switch_to_project=pid,
+    )
+
+
+# ---- parent-id validation --------------------------------------------
+
+
+def _resolve_parent_project(
+    parent_id: str, ctx: SlashContext
+) -> tuple[str | None, str | None]:
+    """Validate `parent_id` against the hub's project list and suggest the
+    closest match on miss (mirrors `_resolve_satellite_host` for hosts).
+
+    Returns `(canonical_id, None)` on success or `(None, error)` on miss.
+    """
+    import difflib
+
+    try:
+        projects = ctx.hub.list_projects()
+    except Exception as e:
+        return None, f"could not list projects to validate parent: {e}"
+    by_id = {p["id"]: p for p in projects}
+    if parent_id in by_id:
+        return parent_id, None
+    by_lower = {pid.lower(): pid for pid in by_id}
+    canonical = by_lower.get(parent_id.lower())
+    if canonical is not None:
+        return canonical, None
+    suggestions = difflib.get_close_matches(
+        parent_id.lower(), list(by_lower), n=1, cutoff=0.4
+    )
+    suggestion = (
+        f" did you mean `{by_lower[suggestions[0]]}`?" if suggestions else ""
+    )
+    known_ids = ", ".join(sorted(by_id)) or "(none)"
+    return None, (
+        f"unknown parent project {parent_id!r}.{suggestion} "
+        f"Known projects: {known_ids}."
     )
 
 
@@ -577,6 +654,96 @@ def _format_tool_result(result) -> str:
     return str(result)
 
 
+# ---- /project tree ---------------------------------------------------
+
+
+def cmd_project_tree(parts: list[str], ctx: SlashContext) -> SlashResult:
+    """Render the project hierarchy as an indented tree.
+
+    Rules:
+      - Roots = projects with no parent_id.
+      - Roots with at least one child render as `<id>/` followed by indented
+        children (umbrellas).
+      - Roots with no children render as standalone leaves.
+      - Children always indent two spaces under their parent.
+    """
+    try:
+        projects = ctx.hub.list_projects()
+    except Exception as e:
+        return SlashResult(handled=True, ok=False, output=f"failed to list projects: {e}")
+    if not projects:
+        return SlashResult(handled=True, output="(no projects)")
+
+    def _parent(p: dict) -> str | None:
+        if p.get("parent_id"):
+            return p["parent_id"]
+        return (p.get("config") or {}).get("parent_id")
+
+    children_of: dict[str, list[dict]] = {}
+    for p in projects:
+        pid = _parent(p)
+        if pid is not None:
+            children_of.setdefault(pid, []).append(p)
+    roots = sorted(
+        (p for p in projects if _parent(p) is None), key=lambda p: p["id"]
+    )
+
+    lines: list[str] = []
+    for r in roots:
+        kids = sorted(children_of.get(r["id"], []), key=lambda c: c["id"])
+        if kids:
+            lines.append(f"{r['id']}/  — {r.get('name') or r['id']}")
+            for k in kids:
+                lines.append(f"  {k['id']}  — {k.get('name') or k['id']}")
+        else:
+            lines.append(f"{r['id']}  — {r.get('name') or r['id']}")
+    return SlashResult(handled=True, output="\n".join(lines))
+
+
+# ---- /project siblings -----------------------------------------------
+
+
+def cmd_project_siblings(parts: list[str], ctx: SlashContext) -> SlashResult:
+    """List sibling project ids — projects sharing the same parent as the
+    active (or named) project. Helpful for the agent to discover what else
+    is under the same research programme. No-op message when the project
+    is top-level."""
+    pos, kv = parse_kv_args(parts)
+    known = dict(kv)
+    if pos:
+        known.setdefault("project_id", pos[0])
+    project_id = known.get("project_id") or ctx.env.project_id
+    if not project_id:
+        return SlashResult(
+            handled=True,
+            ok=False,
+            output="no active project — pass an id: /project siblings <pid>",
+        )
+    try:
+        me = ctx.hub.get_project(project_id)
+    except Exception as e:
+        return SlashResult(handled=True, ok=False, output=f"failed to load project: {e}")
+    parent_id = me.get("parent_id") or (me.get("config") or {}).get("parent_id")
+    if not parent_id:
+        return SlashResult(
+            handled=True,
+            output=f"{project_id} has no parent (top-level project) — no siblings.",
+        )
+    try:
+        kids = ctx.hub.list_children(parent_id)
+    except Exception as e:
+        return SlashResult(handled=True, ok=False, output=f"failed to list siblings: {e}")
+    others = [k for k in kids if k["id"] != project_id]
+    if not others:
+        return SlashResult(
+            handled=True, output=f"(no siblings under {parent_id})"
+        )
+    lines = [f"siblings under {parent_id}:"] + [
+        f"  {k['id']}  — {k.get('name') or k['id']}" for k in sorted(others, key=lambda x: x["id"])
+    ]
+    return SlashResult(handled=True, output="\n".join(lines))
+
+
 # ---- Registry --------------------------------------------------------
 
 
@@ -585,6 +752,8 @@ _COMMANDS: dict[str, HandlerFn] = {
     "project locations": cmd_project_locations,
     "project add-location": cmd_project_add_location,
     "project enrich": cmd_project_enrich,
+    "project tree": cmd_project_tree,
+    "project siblings": cmd_project_siblings,
     "host add": cmd_host_add,
     "host edit": cmd_host_edit,
     "env install": cmd_env_install,
