@@ -203,39 +203,110 @@ def _install_env(
     return {"project_id": project_id, "command": cmd, "result": out}
 
 
+def _family_projects(env: ToolEnv, project_id: str) -> list[dict]:
+    """Return all projects in this project's "family": the project itself,
+    its parent (if any), and its siblings (other children of the same
+    parent). For a top-level project with no children, returns `[self]`.
+    For an umbrella project, returns `[self, ...children]`.
+
+    Used by `where` so the agent can find files across the whole research
+    programme when working inside one assay — the SCENTINEL use case.
+    """
+    try:
+        me = env.hub.get_project(project_id)
+    except Exception:
+        return []
+    parent_id = me.get("parent_id") or (me.get("config") or {}).get("parent_id")
+    family: list[dict] = [me]
+    if parent_id:
+        try:
+            family.append(env.hub.get_project(parent_id))
+        except Exception:
+            pass
+        try:
+            for sib in env.hub.list_children(parent_id):
+                if sib["id"] != project_id:
+                    family.append(sib)
+        except Exception:
+            pass
+    else:
+        try:
+            family.extend(env.hub.list_children(project_id))
+        except Exception:
+            pass
+    return family
+
+
 def _where(env: ToolEnv, *, query: str, project_id: str | None = None) -> list[dict]:
     """Resolve a data alias or partial path to concrete (host, path) pairs by
-    looking across project locations + data_aliases. Free-text matched."""
+    looking across project locations + data_aliases. Free-text matched.
+
+    Family-aware: when the project is part of a parent/child hierarchy, the
+    search expands to include the parent and all sibling projects, so the
+    agent can find data from any assay while working in one. The `project_id`
+    field on each hit identifies the family member it came from.
+    """
     pid = project_id or env.project_id
     if pid is None:
         return []
-    try:
-        proj = env.hub.get_project(pid)
-    except Exception:
+    family = _family_projects(env, pid)
+    if not family:
         return []
-    locs = env.hub.list_project_locations(pid)
-    cfg = proj.get("config") or {}
-    aliases = cfg.get("data_aliases") or []
 
     needle = query.lower()
     hits: list[dict] = []
-    for a in aliases:
-        if needle in (a.get("name", "") + a.get("path", "")).lower():
-            hits.append({
-                "kind": "alias",
-                "name": a.get("name"),
-                "host": a.get("volume", "").split(":")[0],
-                "path": a.get("path"),
-            })
-    for loc in locs:
-        if needle in (loc.get("path", "") + (loc.get("role") or "")).lower():
-            hits.append({
-                "kind": "location",
-                "host": loc.get("host"),
-                "path": loc.get("path"),
-                "role": loc.get("role"),
-            })
+    for proj in family:
+        fid = proj["id"]
+        try:
+            locs = env.hub.list_project_locations(fid)
+        except Exception:
+            locs = []
+        cfg = proj.get("config") or {}
+        aliases = cfg.get("data_aliases") or []
+
+        for a in aliases:
+            if needle in (a.get("name", "") + a.get("path", "")).lower():
+                hits.append({
+                    "kind": "alias",
+                    "project_id": fid,
+                    "name": a.get("name"),
+                    "host": a.get("volume", "").split(":")[0],
+                    "path": a.get("path"),
+                })
+        for loc in locs:
+            if needle in (loc.get("path", "") + (loc.get("role") or "")).lower():
+                hits.append({
+                    "kind": "location",
+                    "project_id": fid,
+                    "host": loc.get("host"),
+                    "path": loc.get("path"),
+                    "role": loc.get("role"),
+                })
     return hits
+
+
+def _list_siblings(env: ToolEnv, *, project_id: str | None = None) -> list[dict]:
+    """Return sibling projects of `project_id` — other children of the same
+    parent. Empty list when the project is top-level. Self is excluded."""
+    pid = project_id or env.project_id
+    if not pid:
+        return []
+    try:
+        me = env.hub.get_project(pid)
+    except Exception:
+        return []
+    parent_id = me.get("parent_id") or (me.get("config") or {}).get("parent_id")
+    if not parent_id:
+        return []
+    try:
+        kids = env.hub.list_children(parent_id)
+    except Exception:
+        return []
+    return [
+        {"id": k["id"], "name": k.get("name") or k["id"]}
+        for k in kids
+        if k["id"] != pid
+    ]
 
 
 # ---- Catalogue --------------------------------------------------------
@@ -414,7 +485,12 @@ def build_catalogue() -> dict[str, Tool]:
             name="where",
             description=(
                 "Resolve a data alias or path fragment against the active project's "
-                "locations and data_aliases. Returns possible (host, path) hits."
+                "locations and data_aliases — and across its parent + sibling "
+                "projects when the project sits under an umbrella (one-level "
+                "hierarchy). CALL THIS when the user asks 'where is X', 'which "
+                "host has the …', or references data from a sibling assay "
+                "('the scRNA cohort', 'the spatial counts'). The `project_id` "
+                "field on each hit names the family member the data came from."
             ),
             parameters={
                 "type": "object",
@@ -426,6 +502,26 @@ def build_catalogue() -> dict[str, Tool]:
             },
             tier=Tier.SAFE,
             fn=_where,
+        ),
+        "list_siblings": Tool(
+            name="list_siblings",
+            description=(
+                "List sibling project ids — other children of the same parent. "
+                "CALL THIS when the user references another assay in the same "
+                "research programme ('what other assays are under SCENTINEL?', "
+                "'list the other cohorts'), or when you need to know which "
+                "family members `where` would search. Empty list for top-level "
+                "projects (no parent → no siblings)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "project_id": _str_field("Project id; defaults to the active one."),
+                },
+                "required": [],
+            },
+            tier=Tier.SAFE,
+            fn=_list_siblings,
         ),
     }
 

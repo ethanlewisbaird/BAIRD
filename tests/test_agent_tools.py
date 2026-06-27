@@ -237,6 +237,149 @@ def test_tool_catalogue_prompt_lists_add_project_location() -> None:
     assert "project_id" in prompt and "host" in prompt and "path" in prompt
 
 
+# ---- Family-aware where + list_siblings (parent/child hierarchy) -----
+
+
+def test_where_expands_to_parent_and_siblings(fake_env) -> None:
+    """When invoked from a child project, `where` should also search the
+    parent and the sibling projects so the agent can find data from any
+    assay in the same research programme."""
+    env, hub, _exec = fake_env
+    env.project_id = "scentinel-scrna"
+
+    projects = {
+        "scentinel-scrna": {
+            "id": "scentinel-scrna",
+            "parent_id": "scentinel",
+            "config": {"data_aliases": []},
+        },
+        "scentinel": {
+            "id": "scentinel",
+            "parent_id": None,
+            "config": {"data_aliases": [
+                {"name": "manifest", "volume": "hibu:/home", "path": "/data/manifest"},
+            ]},
+        },
+        "scentinel-spatial": {
+            "id": "scentinel-spatial",
+            "parent_id": "scentinel",
+            "config": {"data_aliases": []},
+        },
+    }
+    hub.get_project.side_effect = lambda pid: projects[pid]
+    hub.list_children.return_value = [
+        {"id": "scentinel-scrna", "name": "scRNA"},
+        {"id": "scentinel-spatial", "name": "spatial"},
+    ]
+    locations = {
+        "scentinel-scrna": [{"host": "gpu", "path": "/scratch/scrna", "role": "compute"}],
+        "scentinel": [],
+        "scentinel-spatial": [{"host": "hibu", "path": "/data/spatial_counts", "role": "data"}],
+    }
+    hub.list_project_locations.side_effect = lambda pid: locations[pid]
+
+    cat = build_catalogue()
+    # Sibling's location.
+    r = dispatch(cat["where"], {"query": "spatial"}, env)
+    assert r.ok, r.error
+    by_pid = {h["project_id"] for h in r.result}
+    assert "scentinel-spatial" in by_pid
+
+    # Parent's alias.
+    r2 = dispatch(cat["where"], {"query": "manifest"}, env)
+    assert r2.ok
+    assert any(h["project_id"] == "scentinel" for h in r2.result)
+
+
+def test_where_top_level_project_doesnt_expand(fake_env) -> None:
+    """A top-level project with no parent and no children behaves like
+    before: search just its own locations + aliases."""
+    env, hub, _exec = fake_env
+    env.project_id = "standalone"
+    hub.get_project.return_value = {
+        "id": "standalone",
+        "parent_id": None,
+        "config": {"data_aliases": []},
+    }
+    hub.list_children.return_value = []
+    hub.list_project_locations.return_value = [
+        {"host": "hibu", "path": "/data/x", "role": "data"},
+    ]
+    cat = build_catalogue()
+    r = dispatch(cat["where"], {"query": "data"}, env)
+    assert r.ok
+    assert len(r.result) == 1
+    assert r.result[0]["project_id"] == "standalone"
+
+
+def test_where_umbrella_expands_to_children(fake_env) -> None:
+    env, hub, _exec = fake_env
+    env.project_id = "scentinel"
+    hub.get_project.side_effect = lambda pid: {
+        "scentinel": {"id": "scentinel", "parent_id": None, "config": {}},
+        "scentinel-scrna": {"id": "scentinel-scrna", "parent_id": "scentinel", "config": {}},
+    }[pid]
+    hub.list_children.return_value = [
+        {"id": "scentinel-scrna", "name": "scRNA"},
+    ]
+    hub.list_project_locations.side_effect = lambda pid: {
+        "scentinel": [],
+        "scentinel-scrna": [{"host": "gpu", "path": "/scratch/scrna", "role": "compute"}],
+    }[pid]
+    cat = build_catalogue()
+    r = dispatch(cat["where"], {"query": "scratch"}, env)
+    assert r.ok
+    assert any(h["project_id"] == "scentinel-scrna" for h in r.result)
+
+
+def test_list_siblings_tool(fake_env) -> None:
+    env, hub, _exec = fake_env
+    env.project_id = "scentinel-scrna"
+    hub.get_project.return_value = {
+        "id": "scentinel-scrna", "parent_id": "scentinel",
+    }
+    hub.list_children.return_value = [
+        {"id": "scentinel-scrna", "name": "scRNA"},
+        {"id": "scentinel-spatial", "name": "spatial"},
+        {"id": "scentinel-bulkrna", "name": "bulkRNA"},
+    ]
+    cat = build_catalogue()
+    r = dispatch(cat["list_siblings"], {}, env)
+    assert r.ok, r.error
+    ids = sorted(s["id"] for s in r.result)
+    assert ids == ["scentinel-bulkrna", "scentinel-spatial"]
+
+
+def test_list_siblings_empty_for_top_level(fake_env) -> None:
+    env, hub, _exec = fake_env
+    env.project_id = "standalone"
+    hub.get_project.return_value = {"id": "standalone", "parent_id": None}
+    cat = build_catalogue()
+    r = dispatch(cat["list_siblings"], {}, env)
+    assert r.ok and r.result == []
+
+
+def test_list_siblings_is_tier_1_safe() -> None:
+    cat = build_catalogue()
+    assert cat["list_siblings"].tier == Tier.SAFE
+
+
+def test_where_description_mentions_family_expansion() -> None:
+    cat = build_catalogue()
+    desc = cat["where"].description.lower()
+    assert "sibling" in desc or "umbrella" in desc or "family" in desc
+
+
+def test_list_siblings_description_includes_use_case() -> None:
+    cat = build_catalogue()
+    desc = cat["list_siblings"].description.lower()
+    assert (
+        "research programme" in desc
+        or "same parent" in desc
+        or "umbrella" in desc
+    )
+
+
 def test_system_prompt_embeds_tool_catalogue() -> None:
     from baird.repl import _system_prompt
 
@@ -244,3 +387,5 @@ def test_system_prompt_embeds_tool_catalogue() -> None:
     assert "Available hub tools" in sp
     assert "add_project_location" in sp
     assert "register_project" in sp
+    # New family-aware tool is advertised too.
+    assert "list_siblings" in sp
