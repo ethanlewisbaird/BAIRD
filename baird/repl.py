@@ -87,11 +87,15 @@ def run_repl(
     input_fn: Callable[[str], str] = input,
     inputs: Iterable[str] | None = None,
     host_id: str | None = None,
+    session_id: str | None = None,
 ) -> ReplStats:
     """Run the REPL until `/exit`, EOF, or the `inputs` iterable is exhausted.
 
     `inputs` is for tests — when supplied, lines are consumed from it instead
     of calling `input_fn`. EOF behaves like `/exit`.
+
+    `session_id`, if provided, attaches to that specific session (re-loads its
+    history) instead of the project's default `repl-<project_id>` session.
     """
     stats = ReplStats()
     rendered = render_context(repo_ctx)
@@ -100,11 +104,17 @@ def run_repl(
     diff_loop_active = config.diff_loop_enabled
     model_picker_cache: list[str] = []
 
-    session = hub.find_or_create_session_for_task(
-        task_id=f"repl-{config.project_id}",
-        project_id=config.project_id,
-        mode="code",
-    )
+    if session_id is not None:
+        sessions = hub.list_sessions(project_id=config.project_id, limit=200)
+        session = next((s for s in sessions if s["id"] == session_id), None)
+        if session is None:
+            raise RuntimeError(f"session {session_id} not found for project {config.project_id}")
+    else:
+        session = hub.find_or_create_session_for_task(
+            task_id=f"repl-{config.project_id}",
+            project_id=config.project_id,
+            mode="code",
+        )
     console.print(
         Panel.fit(
             f"[green]baird code[/green]  project={config.project_id}  model={config.model}\n"
@@ -127,6 +137,20 @@ def run_repl(
         except (EOFError, KeyboardInterrupt):
             console.print()
             break
+
+        # Multi-line support: a single line of `"""` opens a heredoc-style
+        # block; another `"""` closes it. Lines collapsed into one message.
+        if raw.strip() == '"""':
+            buf: list[str] = []
+            while True:
+                try:
+                    nxt = next(iterator) if iterator is not None else input_fn("... ")
+                except (StopIteration, EOFError, KeyboardInterrupt):
+                    break
+                if nxt.strip() == '"""':
+                    break
+                buf.append(nxt.rstrip("\n"))
+            raw = "\n".join(buf)
 
         line = raw.strip()
         if not line:
@@ -197,10 +221,26 @@ def run_repl(
                         config.model = new_model
                         console.print(f"[yellow]model:[/yellow] {old} → {new_model}")
                 continue
+            if cmd == "sessions":
+                rows = hub.list_sessions(project_id=config.project_id, limit=20)
+                if not rows:
+                    console.print("[dim]no prior sessions for this project[/dim]")
+                else:
+                    console.print(f"[dim]sessions for {config.project_id}[/dim]")
+                    for r in rows:
+                        marker = " [green]*[/green]" if r["id"] == session["id"] else "  "
+                        console.print(
+                            f"{marker} {r['id'][:8]}  {r.get('mode','?')}  "
+                            f"started={r.get('started_at','')[:19]}"
+                        )
+                    console.print(
+                        "[dim]resume one with: baird code --session <full-id>[/dim]"
+                    )
+                continue
             if cmd == "help":
                 console.print(
                     "[dim]/exit  /context  /reset  /cost  /model [id]  "
-                    "/no-diff[/dim]"
+                    "/sessions  /no-diff[/dim]"
                 )
                 continue
             console.print(f"[red]unknown command:[/red] /{cmd} (try /help)")

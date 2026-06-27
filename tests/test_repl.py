@@ -190,6 +190,67 @@ def test_repl_model_list_then_pick_by_index(
     assert seen_models == ["anthropic/claude-sonnet-4-6"]
 
 
+def test_repl_multiline_input_collapses_until_close(
+    tmp_path: Path, client: TestClient
+) -> None:
+    hub = _Hub(client)
+    console = Console(record=True, width=120)
+    sent: list[list[dict]] = []
+
+    def t(req):
+        sent.append(req["body"]["messages"])
+        return {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0},
+        }
+
+    run_repl(
+        repo_ctx=_ctx(tmp_path),
+        hub=hub,
+        model_client=OpenRouterClient(transport=t),
+        config=ReplConfig(project_id="p6"),
+        console=console,
+        inputs=['"""', "line one", "line two", "line three", '"""', "/exit"],
+    )
+    user_msgs = [m for batch in sent for m in batch if m["role"] == "user"]
+    assert user_msgs[0]["content"] == "line one\nline two\nline three"
+
+
+def test_repl_session_resume_loads_existing(
+    tmp_path: Path, client: TestClient
+) -> None:
+    """Pass session_id explicitly and the REPL attaches without creating new."""
+    hub = _Hub(client)
+    s = hub.new_session(mode="code", project_id="p7", task_id="repl-p7")
+    # Pre-load some history.
+    hub.append_message(s["id"], role="user", content="prior turn")
+    hub.append_message(s["id"], role="assistant", content="prior reply")
+
+    sent: list[list[dict]] = []
+
+    def t(req):
+        sent.append(req["body"]["messages"])
+        return {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0},
+        }
+
+    console = Console(record=True, width=120)
+    run_repl(
+        repo_ctx=_ctx(tmp_path),
+        hub=hub,
+        model_client=OpenRouterClient(transport=t),
+        config=ReplConfig(project_id="p7"),
+        console=console,
+        inputs=["new turn", "/exit"],
+        session_id=s["id"],
+    )
+    # Prior history should be in the messages sent.
+    sent_contents = [m["content"] for batch in sent for m in batch]
+    assert "prior turn" in sent_contents
+    assert "prior reply" in sent_contents
+
+
 def test_repl_records_action_per_turn(tmp_path: Path, client: TestClient) -> None:
     hub = _Hub(client)
     console = Console(record=True, width=120)

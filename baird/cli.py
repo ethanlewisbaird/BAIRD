@@ -143,6 +143,9 @@ def code(
         "-m",
         help="OpenRouter model id. Falls back to $OPENROUTER_MODEL, then the REPL default.",
     ),
+    session: str | None = typer.Option(
+        None, "--session", help="Resume a specific session id instead of the project default."
+    ),
 ) -> None:
     """Interactive coding mode.
 
@@ -201,6 +204,7 @@ def code(
             model_client=OpenRouterClient(transport=transport),
             config=ReplConfig(**repl_cfg_kwargs),
             console=console,
+            session_id=session,
         )
 
 
