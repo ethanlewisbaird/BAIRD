@@ -30,6 +30,17 @@ class CheckoutHost(BaseModel):
     branch: str | None = None
 
 
+class Location(BaseModel):
+    """Where this project lives on a given host. A project can have multiple —
+    e.g. raw data on the HPC, training on a GPU workstation, notebooks on a
+    laptop. `role` is a free-form tag ("data", "compute", "notebook", "repo").
+    """
+
+    host: str
+    path: str
+    role: str | None = None
+
+
 class Rule(BaseModel):
     id: str
     description: str
@@ -61,6 +72,7 @@ class ProjectYaml(BaseModel):
     github: str | None = None
     context: str | None = None
     checkout_hosts: list[CheckoutHost] = Field(default_factory=list)
+    locations: list[Location] = Field(default_factory=list)
     goals: list[Goal] = Field(default_factory=list)
     state: dict[str, Any] = Field(default_factory=dict)
     data_aliases: list[DataAlias] = Field(default_factory=list)
@@ -79,6 +91,16 @@ def save_project_yaml(model: ProjectYaml, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         yaml.safe_dump(model.model_dump(mode="json"), f, sort_keys=False)
+
+
+def effective_locations(py: ProjectYaml) -> list[Location]:
+    """Return the project's locations, falling back to `checkout_hosts` if
+    `locations` is empty. This is the back-compat read alias — older project
+    rows used `checkout_hosts: [{host_id, path, branch}, ...]` before the
+    multi-location model landed."""
+    if py.locations:
+        return list(py.locations)
+    return [Location(host=ch.host_id, path=ch.path, role="repo") for ch in py.checkout_hosts]
 
 
 def project_yaml_template(project_id: str, name: str, github: str | None = None) -> ProjectYaml:

@@ -51,6 +51,16 @@ class ProjectOut(ProjectIn):
     created_at: dt.datetime
 
 
+class LocationIn(BaseModel):
+    host: str
+    path: str
+    role: Optional[str] = None
+
+
+class LocationOut(LocationIn):
+    pass
+
+
 class DecisionIn(BaseModel):
     project_id: str
     text: str
@@ -202,6 +212,24 @@ def _action_out(row: Action) -> ActionOut:
     )
 
 
+def _read_locations(cfg: dict[str, Any]) -> list[LocationOut]:
+    """Pull locations out of a project's `config` JSON, honouring the
+    `checkout_hosts` legacy shape if the new `locations` key is absent."""
+    raw = cfg.get("locations")
+    if raw:
+        return [
+            LocationOut(host=r["host"], path=r["path"], role=r.get("role"))
+            for r in raw
+            if isinstance(r, dict) and "host" in r and "path" in r
+        ]
+    legacy = cfg.get("checkout_hosts") or []
+    return [
+        LocationOut(host=r["host_id"], path=r["path"], role="repo")
+        for r in legacy
+        if isinstance(r, dict) and "host_id" in r and "path" in r
+    ]
+
+
 def _project_out(row: Project) -> ProjectOut:
     return ProjectOut(
         id=row.id,
@@ -252,6 +280,59 @@ def register_routes(app: FastAPI) -> None:
         if row is None:
             raise HTTPException(404, "project not found")
         return _project_out(row)
+
+    # ---- Project locations ----
+    # Locations are stored inside `Project.config["locations"]` (JSON). We also
+    # auto-migrate any legacy `checkout_hosts: [{host_id,path,branch}, ...]` on
+    # read, so old project rows keep working without a schema change.
+
+    @app.get("/projects/{project_id}/locations", response_model=list[LocationOut])
+    def list_project_locations(project_id: str, s: Session = Depends(get_memory)) -> list:
+        row = s.get(Project, project_id)
+        if row is None:
+            raise HTTPException(404, "project not found")
+        return _read_locations(row.config or {})
+
+    @app.post("/projects/{project_id}/locations", response_model=list[LocationOut])
+    def add_project_location(
+        project_id: str, payload: LocationIn, s: Session = Depends(get_memory)
+    ) -> list:
+        row = s.get(Project, project_id)
+        if row is None:
+            raise HTTPException(404, "project not found")
+        cfg = dict(row.config or {})
+        existing = _read_locations(cfg)
+        # Replace any (host, path) duplicate; otherwise append.
+        existing = [
+            loc for loc in existing
+            if not (loc.host == payload.host and loc.path == payload.path)
+        ]
+        existing.append(LocationOut(host=payload.host, path=payload.path, role=payload.role))
+        cfg["locations"] = [loc.model_dump() for loc in existing]
+        # Drop the legacy `checkout_hosts` mirror — `locations` is now canonical.
+        cfg.pop("checkout_hosts", None)
+        row.config = cfg
+        s.commit()
+        return existing
+
+    @app.delete("/projects/{project_id}/locations", response_model=list[LocationOut])
+    def remove_project_location(
+        project_id: str,
+        host: str = Query(...),
+        path: str = Query(...),
+        s: Session = Depends(get_memory),
+    ) -> list:
+        row = s.get(Project, project_id)
+        if row is None:
+            raise HTTPException(404, "project not found")
+        cfg = dict(row.config or {})
+        existing = _read_locations(cfg)
+        remaining = [loc for loc in existing if not (loc.host == host and loc.path == path)]
+        cfg["locations"] = [loc.model_dump() for loc in remaining]
+        cfg.pop("checkout_hosts", None)
+        row.config = cfg
+        s.commit()
+        return remaining
 
     # ---- Decisions ----
 

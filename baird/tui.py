@@ -26,20 +26,22 @@ import os
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.text import Text
 
 from .context_loader import RepoContext, render_context
 from .diff_apply import DiffApplyError, apply_diff_to_repo
 from .memory_client import HubClient
-from .model import ModelError, OpenRouterClient
-from .model import top_openrouter_models
+from .model import ModelError, OpenRouterClient, top_openrouter_models
 from .repl import (
     HISTORY_TURN_CAP,
     ReplConfig,
@@ -51,6 +53,100 @@ from .repl import (
 from .tui_keys import read_key
 
 
+@dataclass
+class FormField:
+    """One field in a `collect_form` form.
+
+    `validator` returns an error message (string) if the value is invalid, or
+    None when it's accepted. Validators run after each prompt; on error the
+    user is re-prompted.
+    """
+
+    name: str
+    prompt: str
+    default: str | None = None
+    required: bool = False
+    validator: Callable[[str], str | None] | None = None
+
+
+def _form_status_table(
+    fields: list[FormField], known: dict[str, str]
+) -> Table:
+    t = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+    t.add_column("field"); t.add_column("status"); t.add_column("value", overflow="fold")
+    for f in fields:
+        v = known.get(f.name)
+        if v is not None and v != "":
+            status = "[green]set[/green]"
+            value = str(v)
+        elif f.default is not None:
+            status = "[cyan]default[/cyan]"
+            value = f.default
+        elif f.required:
+            status = "[red]missing[/red]"
+            value = ""
+        else:
+            status = "[dim]optional[/dim]"
+            value = ""
+        t.add_row(f.name, status, value)
+    return t
+
+
+def collect_form_values(
+    fields: list[FormField],
+    known: dict[str, str] | None,
+    *,
+    input_fn: Callable[[str], str],
+    console: Console | None = None,
+) -> dict[str, str]:
+    """Render a single status panel for `fields`, then prompt once for any
+    missing required field (or any field whose prompt is forced by the
+    caller via a `None` known value with a default — we just fill the default).
+
+    The flow is intentionally one-shot: if the caller already supplied a value
+    inline (the `/`-command parsing path), we don't re-prompt. Only the gaps
+    are asked about. Validators may re-prompt that one field until it passes.
+
+    Returns the merged dict. Optional unset fields with no default are absent
+    from the returned dict (callers should treat absence as "leave it alone").
+    """
+    known = dict(known or {})
+    if console is not None:
+        console.print(Panel(_form_status_table(fields, known), border_style="cyan", title="form"))
+
+    out: dict[str, str] = {}
+    for f in fields:
+        v = known.get(f.name)
+        if v is not None and v != "":
+            out[f.name] = v
+            continue
+        if not f.required:
+            if f.default is not None:
+                out[f.name] = f.default
+            continue
+        while True:
+            prompt = f.prompt
+            if f.default is not None:
+                prompt = f"{prompt} [{f.default}]"
+            prompt = prompt + ": "
+            raw = input_fn(prompt).strip()
+            if raw == "" and f.default is not None:
+                raw = f.default
+            if raw == "":
+                if console is not None:
+                    console.print(Text(f"{f.name} is required", style="red"))
+                continue
+            if f.validator is not None:
+                err = f.validator(raw)
+                if err is not None:
+                    if console is not None:
+                        console.print(Text(err, style="red"))
+                    continue
+            out[f.name] = raw
+            break
+    return out
+
+
 def run_tui_repl(
     *,
     repo_ctx: RepoContext,
@@ -58,9 +154,9 @@ def run_tui_repl(
     model_client: OpenRouterClient,
     config: ReplConfig,
     console: Console,
-    inputs: Optional[Iterable[str]] = None,
-    host_id: Optional[str] = None,
-    session_id: Optional[str] = None,
+    inputs: Iterable[str] | None = None,
+    host_id: str | None = None,
+    session_id: str | None = None,
 ) -> ReplStats:
     """TUI variant of `run_repl`. Same semantics, persistent layout."""
     stats = ReplStats()
@@ -83,7 +179,7 @@ def run_tui_repl(
             mode="code",
         )
 
-    iterator: Optional[Iterable[str]] = iter(inputs) if inputs is not None else None
+    iterator: Iterable[str] | None = iter(inputs) if inputs is not None else None
 
     def _print(line: Text | str) -> None:
         console.print(line)
@@ -129,6 +225,36 @@ def run_tui_repl(
                 continue
 
             if line.startswith("/"):
+                # First: try the hub-first slash registry (see baird/slash.py).
+                from .agent_tools import ToolEnv
+                from .slash import SlashContext
+                from .slash import try_dispatch as _try_slash
+
+                slash_ctx = SlashContext(
+                    hub=hub,
+                    env=ToolEnv(hub=hub, project_id=config.project_id),
+                    input_fn=_maybe_input,
+                    console=console,
+                    active_host=getattr(config, "_active_host", None),
+                )
+                slash_res = _try_slash(line[1:], slash_ctx)
+                if slash_res is not None:
+                    if slash_res.output:
+                        style = "green" if slash_res.ok else "red"
+                        _print(Text(slash_res.output, style=style))
+                    if slash_res.active_host:
+                        config._active_host = slash_res.active_host  # type: ignore[attr-defined]
+                    if slash_res.switch_to_project:
+                        from .repl import _switch_project
+
+                        swapped = _switch_project(
+                            slash_res.switch_to_project, hub, config, host_id, console
+                        )
+                        if swapped[0] is not None:
+                            rendered, system, repo_ctx, session = swapped
+                            console.print(_render_header(repo_ctx, host_id, session, config))
+                    continue
+
                 cmd = line[1:].split()[0].lower()
                 if cmd in {"exit", "quit"}:
                     break
@@ -230,9 +356,15 @@ def run_tui_repl(
                             ))
                     continue
                 if cmd == "help":
+                    from .slash import commands as _slash_cmds
+
                     _print(Text(
                         "/exit  /context  /reset  /cost  /model [id]  "
                         "/sessions  /project [id|new <id>]  /no-diff",
+                        style="dim",
+                    ))
+                    _print(Text(
+                        "hub-first: " + "  ".join(f"/{c}" for c in _slash_cmds()),
                         style="dim",
                     ))
                     continue
@@ -344,7 +476,7 @@ def _handle_model_cmd(
         except Exception as e:
             print_(Text(f"could not fetch model list ({e})", style="yellow"))
     else:
-        new_model: Optional[str] = None
+        new_model: str | None = None
         if arg.isdigit() and model_picker_cache:
             idx = int(arg)
             if 1 <= idx <= len(model_picker_cache):
