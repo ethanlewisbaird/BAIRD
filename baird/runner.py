@@ -29,7 +29,7 @@ log = logging.getLogger("baird.runner")
 class FiringResult:
     action_id: str
     session_id: str
-    completion: Completion
+    completion: Completion | None
     runtime_s: float
     truncated: bool = False
     summary: str | None = None
@@ -46,6 +46,11 @@ def run_task_once(
 ) -> FiringResult:
     """Fire `task` once. Returns the FiringResult.
 
+    Dispatches on `runnable.kind`:
+      - `model` (default): free-form completion against runnable.prompt.
+      - `self_improve`: runs `baird.self_improve.run_self_improvement`.
+      - `research`: runs `baird.research.run_research` with runnable.args.
+
     Side effects:
       - Creates one Action row (host=host_id, task_id=task.id, model_name=...)
       - Creates one Session (mode='agent', task_id=task.id) and two Messages
@@ -54,6 +59,13 @@ def run_task_once(
     """
     runnable = task.runnable
     started = time.monotonic()
+
+    # Dispatch on kind. `self_improve` and `research` bypass the model-prompt
+    # path entirely — they own their action accounting.
+    if runnable.kind == "self_improve":
+        return _run_self_improve(task, hub=hub, model_client=model_client, notifier=notifier)
+    if runnable.kind == "research":
+        return _run_research(task, hub=hub, model_client=model_client, notifier=notifier)
 
     # Persistent per-task conversation thread (Phase 4b): one Session per
     # task_id, reused across firings. Context compressor / rolling summary
@@ -139,3 +151,70 @@ def _summarize(text: str, *, max_chars: int = 600) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars].rstrip() + "…"
+
+
+# ----- kind dispatch ---------------------------------------------------
+
+
+def _run_self_improve(
+    task: Task,
+    *,
+    hub: HubClient,
+    model_client: OpenRouterClient,
+    notifier: Notifier | None,
+) -> FiringResult:
+    from .self_improve import run_self_improvement
+
+    runnable = task.runnable
+    started = time.monotonic()
+    since_hours = int(runnable.args.get("since_hours", 168))
+    proposals = run_self_improvement(
+        hub=hub,
+        model_client=model_client,
+        notifier=notifier,
+        since_hours=since_hours,
+        model=runnable.model,
+    )
+    runtime = time.monotonic() - started
+    summary = f"{len(proposals)} proposals"
+    return FiringResult(
+        action_id="",  # self_improve writes its own action
+        session_id="",
+        completion=None,
+        runtime_s=runtime,
+        truncated=False,
+        summary=summary,
+    )
+
+
+def _run_research(
+    task: Task,
+    *,
+    hub: HubClient,
+    model_client: OpenRouterClient,
+    notifier: Notifier | None,
+) -> FiringResult:
+    from .research import run_research
+
+    runnable = task.runnable
+    started = time.monotonic()
+    query = runnable.args.get("query") or runnable.prompt
+    if not query:
+        raise ValueError("research task needs runnable.args.query (or prompt)")
+    brief = run_research(
+        query=query,
+        hub=hub,
+        model_client=model_client,
+        notifier=notifier,
+        project_id=runnable.project_id,
+        model=runnable.model,
+    )
+    runtime = time.monotonic() - started
+    return FiringResult(
+        action_id="",
+        session_id="",
+        completion=None,
+        runtime_s=runtime,
+        truncated=False,
+        summary=_summarize(brief or ""),
+    )

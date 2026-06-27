@@ -57,13 +57,25 @@ Trigger = CronTrigger | IntervalTrigger | WatchTrigger | ReactiveTrigger
 
 
 class Runnable(BaseModel):
-    prompt: str
+    # `kind` picks the executor: a free-form model call vs. one of the
+    # built-in agentic loops. For `self_improve` and `research`, `prompt` is
+    # unused (the loop has its own prompt) — but the field is required so the
+    # YAML stays uniform.
+    kind: str = "model"  # model | self_improve | research
+    prompt: str = ""
     model: str = "anthropic/claude-3-haiku"
     system: str | None = None
     project_id: str | None = None
     context_sources: list[str] = Field(default_factory=list)  # e.g. ["repo", "decisions", "rules"]
     max_tokens: int = 1024
     temperature: float = 0.2
+    # Where to run. `null` (the default) means "on the hub itself". When set,
+    # the orchestrator dispatches the run_command piece to that satellite's
+    # executor (see baird.executor_client.ExecutorClient).
+    host_id: str | None = None
+    # `research` kind: the query to send. `self_improve` kind: max history
+    # window to review.
+    args: dict[str, Any] = Field(default_factory=dict)
 
 
 class Budget(BaseModel):

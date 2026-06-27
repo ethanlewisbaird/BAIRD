@@ -97,3 +97,75 @@ def test_long_output_summary_truncated(client: TestClient) -> None:
     res = run_task_once(_task(), hub=hub, model_client=model_client)
     assert len(res.summary or "") <= 601
     assert (res.summary or "").endswith("…")
+
+
+def test_runner_dispatches_to_research_kind(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`runnable.kind: research` should invoke run_research, not the
+    free-form model path."""
+    from baird import runner as runner_mod
+    from baird.tasks import IntervalTrigger, Runnable, Task
+
+    called: dict = {}
+
+    def fake_research(*, query, hub, model_client, notifier, project_id, model):
+        called["query"] = query
+        called["model"] = model
+        return "research brief body"
+
+    monkeypatch.setattr(runner_mod, "_run_research", lambda task, **kw: runner_mod.FiringResult(
+        action_id="",
+        session_id="",
+        completion=None,
+        runtime_s=0.0,
+        summary=fake_research(
+            query=task.runnable.args.get("query"),
+            hub=kw["hub"],
+            model_client=kw["model_client"],
+            notifier=kw.get("notifier"),
+            project_id=task.runnable.project_id,
+            model=task.runnable.model,
+        ),
+    ))
+
+    task = Task(
+        id="t-research",
+        trigger=IntervalTrigger(interval_seconds=60),
+        runnable=Runnable(
+            kind="research",
+            args={"query": "scRNA benchmarks"},
+            model="anthropic/claude-3-haiku",
+        ),
+    )
+    hub = _Hub(client)
+    res = run_task_once(task, hub=hub, model_client=OpenRouterClient(transport=lambda r: {}))
+    assert called["query"] == "scRNA benchmarks"
+    assert res.summary == "research brief body"
+
+
+def test_runner_dispatches_to_self_improve_kind(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from baird import runner as runner_mod
+    from baird.tasks import IntervalTrigger, Runnable, Task
+
+    monkeypatch.setattr(
+        runner_mod,
+        "_run_self_improve",
+        lambda task, **kw: runner_mod.FiringResult(
+            action_id="",
+            session_id="",
+            completion=None,
+            runtime_s=0.1,
+            summary="2 proposals",
+        ),
+    )
+    task = Task(
+        id="t-improve",
+        trigger=IntervalTrigger(interval_seconds=60),
+        runnable=Runnable(kind="self_improve"),
+    )
+    hub = _Hub(client)
+    res = run_task_once(task, hub=hub, model_client=OpenRouterClient(transport=lambda r: {}))
+    assert res.summary == "2 proposals"
