@@ -96,7 +96,9 @@ def test_project_new_inline_args_skips_prompts() -> None:
     ctx, hub, _ = _ctx(answers=[])  # no prompts expected
     r = try_dispatch("project new scrna name=scRNA github=me/scrna", ctx)
     assert r is not None and r.handled and r.ok
-    hub.upsert_project.assert_called_once_with(id="scrna", name="scRNA", github="me/scrna")
+    hub.upsert_project.assert_called_once_with(
+        id="scrna", name="scRNA", github="me/scrna", parent_id=None
+    )
 
 
 def test_project_new_prompts_for_missing_id() -> None:
@@ -265,6 +267,111 @@ def test_env_install_proceeds_on_yes() -> None:
     assert r.handled and r.ok, r.output
     # write_file (reqs.txt) + run_command (pip install)
     assert [c[0] for c in exec_.calls] == ["write_file", "run_command"]
+
+
+# ---- /project new parent_id ----------------------------------------
+
+
+def test_project_new_inline_parent_flag() -> None:
+    """`/project new <id> --parent <pid>` shorthand."""
+    ctx, hub, _ = _ctx(answers=[])
+    hub.list_projects.return_value = [
+        {"id": "scentinel", "name": "SCENTINEL"},
+    ]
+    hub.upsert_project.return_value = {"id": "scrna"}
+    r = try_dispatch("project new scrna --parent scentinel", ctx)
+    assert r.handled and r.ok, r.output
+    hub.upsert_project.assert_called_once_with(
+        id="scrna", name="scrna", github=None, parent_id="scentinel"
+    )
+
+
+def test_project_new_parent_kv_form() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.list_projects.return_value = [{"id": "scentinel", "name": "SCENTINEL"}]
+    hub.upsert_project.return_value = {"id": "scrna"}
+    r = try_dispatch("project new scrna parent=scentinel", ctx)
+    assert r.handled and r.ok, r.output
+    assert hub.upsert_project.call_args.kwargs["parent_id"] == "scentinel"
+
+
+def test_project_new_unknown_parent_suggests_closest() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.list_projects.return_value = [{"id": "scentinel", "name": "S"}]
+    r = try_dispatch("project new scrna --parent scintenel", ctx)
+    assert r.handled and not r.ok
+    assert "unknown parent" in r.output.lower()
+    assert "scentinel" in r.output  # suggestion
+    hub.upsert_project.assert_not_called()
+
+
+def test_project_new_blank_parent_creates_top_level() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.upsert_project.return_value = {"id": "p"}
+    r = try_dispatch("project new p", ctx)
+    assert r.handled and r.ok
+    assert hub.upsert_project.call_args.kwargs["parent_id"] is None
+
+
+# ---- /project tree --------------------------------------------------
+
+
+def test_project_tree_renders_umbrellas_and_standalones() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.list_projects.return_value = [
+        {"id": "scentinel", "name": "SCENTINEL", "parent_id": None},
+        {"id": "scentinel-scrna", "name": "scRNA", "parent_id": "scentinel"},
+        {"id": "scentinel-spatial", "name": "spatial", "parent_id": "scentinel"},
+        {"id": "baird", "name": "BAIRD", "parent_id": None},
+    ]
+    r = try_dispatch("project tree", ctx)
+    assert r.handled and r.ok, r.output
+    out = r.output
+    assert "scentinel/" in out  # umbrella marker
+    assert "  scentinel-scrna" in out  # child indent
+    assert "  scentinel-spatial" in out
+    # Standalone root has no trailing slash.
+    assert "baird  —" in out
+
+
+def test_project_tree_empty() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.list_projects.return_value = []
+    r = try_dispatch("project tree", ctx)
+    assert r.handled and r.ok
+    assert "no projects" in r.output.lower()
+
+
+# ---- /project siblings ----------------------------------------------
+
+
+def test_project_siblings_lists_others_under_same_parent() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    ctx.env.project_id = "scentinel-scrna"
+    hub.get_project.return_value = {
+        "id": "scentinel-scrna",
+        "parent_id": "scentinel",
+    }
+    hub.list_children.return_value = [
+        {"id": "scentinel-scrna", "name": "scRNA"},
+        {"id": "scentinel-spatial", "name": "spatial"},
+        {"id": "scentinel-bulkrna", "name": "bulkRNA"},
+    ]
+    r = try_dispatch("project siblings", ctx)
+    assert r.handled and r.ok, r.output
+    assert "scentinel-spatial" in r.output
+    assert "scentinel-bulkrna" in r.output
+    # Self is excluded.
+    assert "scentinel-scrna" not in r.output
+
+
+def test_project_siblings_top_level_says_so() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    ctx.env.project_id = "baird"
+    hub.get_project.return_value = {"id": "baird", "parent_id": None}
+    r = try_dispatch("project siblings", ctx)
+    assert r.handled and r.ok
+    assert "no parent" in r.output.lower() or "no siblings" in r.output.lower()
 
 
 # ---- Unknown command ------------------------------------------------
