@@ -146,6 +146,10 @@ def code(
     session: str | None = typer.Option(
         None, "--session", help="Resume a specific session id instead of the project default."
     ),
+    tui: bool = typer.Option(
+        True, "--tui/--no-tui",
+        help="Default is the persistent layout; --no-tui falls back to the line REPL.",
+    ),
 ) -> None:
     """Interactive coding mode.
 
@@ -197,8 +201,14 @@ def code(
                 auth_token=host_cfg.effective_hub_token(),
             )
 
+    runner_fn = run_repl
+    if tui:
+        from .tui import run_tui_repl
+
+        runner_fn = run_tui_repl
+
     with _hub_client_from_host() as hub:
-        run_repl(
+        runner_fn(
             repo_ctx=ctx,
             hub=hub,
             model_client=OpenRouterClient(transport=transport),
