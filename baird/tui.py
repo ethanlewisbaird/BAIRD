@@ -157,6 +157,64 @@ def run_tui_repl(
                 if cmd == "model":
                     _handle_model_cmd(line, config, model_picker_cache, console, _print)
                     continue
+                if cmd == "project":
+                    from .context_loader import lite_repo_context
+                    from .project_yaml import ProjectYaml
+
+                    parts = line.split()
+                    if len(parts) == 1:
+                        rows = hub.list_projects()
+                        if not rows:
+                            _print(Text("no projects on the hub", style="dim"))
+                        else:
+                            for r in rows:
+                                marker = "*" if r["id"] == config.project_id else " "
+                                _print(Text(f" {marker} {r['id']}  {r.get('name','')}", style="cyan"))
+                            _print(Text("switch: /project <id>   create: /project new <id> [name]", style="dim"))
+                        continue
+                    sub = parts[1]
+                    if sub == "new":
+                        if len(parts) < 3:
+                            _print(Text("usage: /project new <id> [name]", style="red"))
+                            continue
+                        new_id = parts[2]
+                        new_name = " ".join(parts[3:]) if len(parts) > 3 else new_id
+                        try:
+                            hub.upsert_project(id=new_id, name=new_name)
+                        except Exception as e:
+                            _print(Text(f"create failed: {e}", style="red"))
+                            continue
+                        _print(Text(f"created project {new_id}", style="green"))
+                        target_id = new_id
+                    else:
+                        target_id = sub
+                    try:
+                        proj_row = hub.get_project(target_id)
+                    except Exception as e:
+                        _print(Text(f"project '{target_id}' not on hub: {e}", style="red"))
+                        continue
+                    py = ProjectYaml(
+                        id=proj_row["id"],
+                        name=proj_row.get("name") or proj_row["id"],
+                        github=proj_row.get("github"),
+                        context=proj_row.get("context"),
+                    )
+                    repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
+                    rendered = render_context(repo_ctx)
+                    system = _system_prompt(rendered)
+                    config.project_id = target_id
+                    config.project_root = None
+                    session = hub.find_or_create_session_for_task(
+                        task_id=f"repl-{target_id}",
+                        project_id=target_id,
+                        mode="code",
+                    )
+                    console.print(_render_header(repo_ctx, host_id, session, config))
+                    _print(Text(
+                        f"switched to project {target_id}  session={session['id'][:8]}",
+                        style="yellow",
+                    ))
+                    continue
                 if cmd == "sessions":
                     rows = hub.list_sessions(project_id=config.project_id, limit=20)
                     if not rows:
@@ -174,7 +232,7 @@ def run_tui_repl(
                 if cmd == "help":
                     _print(Text(
                         "/exit  /context  /reset  /cost  /model [id]  "
-                        "/sessions  /no-diff",
+                        "/sessions  /project [id|new <id>]  /no-diff",
                         style="dim",
                     ))
                     continue

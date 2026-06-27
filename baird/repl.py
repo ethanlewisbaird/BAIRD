@@ -221,6 +221,67 @@ def run_repl(
                         config.model = new_model
                         console.print(f"[yellow]model:[/yellow] {old} → {new_model}")
                 continue
+            if cmd == "project":
+                from .context_loader import lite_repo_context
+                from .project_yaml import ProjectYaml
+
+                parts = line.split()
+                if len(parts) == 1:
+                    rows = hub.list_projects()
+                    if not rows:
+                        console.print("[dim]no projects on the hub[/dim]")
+                    else:
+                        for r in rows:
+                            marker = " [green]*[/green]" if r["id"] == config.project_id else "  "
+                            console.print(
+                                f"{marker} [cyan]{r['id']}[/cyan]  {r.get('name','')}"
+                            )
+                        console.print(
+                            "[dim]switch: /project <id>   create: /project new <id> [name][/dim]"
+                        )
+                    continue
+                sub = parts[1]
+                if sub == "new":
+                    if len(parts) < 3:
+                        console.print("[red]usage:[/red] /project new <id> [name]")
+                        continue
+                    new_id = parts[2]
+                    new_name = " ".join(parts[3:]) if len(parts) > 3 else new_id
+                    try:
+                        hub.upsert_project(id=new_id, name=new_name)
+                    except Exception as e:
+                        console.print(f"[red]create failed:[/red] {e}")
+                        continue
+                    console.print(f"[green]created project {new_id}[/green]")
+                    target_id = new_id
+                else:
+                    target_id = sub
+                try:
+                    proj_row = hub.get_project(target_id)
+                except Exception as e:
+                    console.print(f"[red]project '{target_id}' not on hub:[/red] {e}")
+                    continue
+                py = ProjectYaml(
+                    id=proj_row["id"],
+                    name=proj_row.get("name") or proj_row["id"],
+                    github=proj_row.get("github"),
+                    context=proj_row.get("context"),
+                )
+                repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
+                rendered = render_context(repo_ctx)
+                system = _system_prompt(rendered)
+                config.project_id = target_id
+                config.project_root = None
+                session = hub.find_or_create_session_for_task(
+                    task_id=f"repl-{target_id}",
+                    project_id=target_id,
+                    mode="code",
+                )
+                console.print(
+                    f"[yellow]switched to project[/yellow] {target_id}  "
+                    f"session={session['id'][:8]}"
+                )
+                continue
             if cmd == "sessions":
                 rows = hub.list_sessions(project_id=config.project_id, limit=20)
                 if not rows:
@@ -240,7 +301,7 @@ def run_repl(
             if cmd == "help":
                 console.print(
                     "[dim]/exit  /context  /reset  /cost  /model [id]  "
-                    "/sessions  /no-diff[/dim]"
+                    "/sessions  /project [id|new <id>]  /no-diff[/dim]"
                 )
                 continue
             console.print(f"[red]unknown command:[/red] /{cmd} (try /help)")

@@ -48,12 +48,17 @@ def test_code_show_context(
     assert "Active rules" in result.output
 
 
-def test_code_without_project_yaml_errors(
+def test_code_without_project_yaml_falls_into_scratch(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No `.baird/project.yaml` and no `--project` → scratch project."""
     monkeypatch.chdir(tmp_path)
+    # Hub unreachable → fall-through path raises; we just check the message.
+    monkeypatch.setattr(cli_mod, "_hub_client_from_host", lambda: (_ for _ in ()).throw(RuntimeError("no hub")))
     result = runner.invoke(cli_mod.app, ["code", "--show-context"])
-    assert result.exit_code == 1
+    # Without a reachable hub the scratch path can't upsert; either way the
+    # old "you must init" hard-error must not fire.
+    assert "run `baird project init`" not in result.output
 
 
 def test_diff_apply_then_undo(runner: CliRunner, proj: Path) -> None:

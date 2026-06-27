@@ -146,6 +146,10 @@ def code(
     session: str | None = typer.Option(
         None, "--session", help="Resume a specific session id instead of the project default."
     ),
+    project: str | None = typer.Option(
+        None, "--project", "-p",
+        help="Run against a project from the hub (no .baird/project.yaml needed).",
+    ),
     tui: bool = typer.Option(
         True, "--tui/--no-tui",
         help="Default is the persistent layout; --no-tui falls back to the line REPL.",
@@ -153,22 +157,46 @@ def code(
 ) -> None:
     """Interactive coding mode.
 
-    Phase 3 ships the substrate: this command loads the repo context for the
-    current project. The actual LLM call lands in Phase 4 (OpenRouter). Until
-    then, `--show-context` is the useful flag.
+    Three ways to pick a project:
+      1. `--project <id>` — pull it from the hub, no local checkout needed
+      2. `.baird/project.yaml` in cwd — current behaviour, full repo context
+      3. neither — falls into the scratch project (chat-style, no diff loop)
     """
-    from .context_loader import load_repo_context, render_context
+    from .context_loader import load_repo_context, lite_repo_context, render_context
+    from .project_yaml import ProjectYaml
 
     root = Path.cwd()
-    if not (root / ".baird" / "project.yaml").exists():
-        console.print("[red]no .baird/project.yaml in cwd[/red] — run `baird project init`")
-        raise typer.Exit(1)
+    has_local = (root / ".baird" / "project.yaml").exists()
 
-    try:
+    if project is not None:
         with _hub_client_from_host() as hub:
-            ctx = load_repo_context(root, hub=hub)
-    except Exception:
-        ctx = load_repo_context(root, hub=None)
+            if project == "scratch":
+                hub.upsert_project(id="scratch", name="Scratch", context="Ad-hoc work.")
+            try:
+                proj_row = hub.get_project(project)
+            except Exception as e:
+                console.print(f"[red]could not load project '{project}' from hub:[/red] {e}")
+                raise typer.Exit(1)
+            py = ProjectYaml(
+                id=proj_row["id"],
+                name=proj_row.get("name") or proj_row["id"],
+                github=proj_row.get("github"),
+                context=proj_row.get("context"),
+            )
+            ctx = lite_repo_context(py, hub=hub)
+    elif has_local:
+        try:
+            with _hub_client_from_host() as hub:
+                ctx = load_repo_context(root, hub=hub)
+        except Exception:
+            ctx = load_repo_context(root, hub=None)
+    else:
+        with _hub_client_from_host() as hub:
+            hub.upsert_project(id="scratch", name="Scratch", context="Ad-hoc work, no project committed yet.")
+            proj_row = hub.get_project("scratch")
+            py = ProjectYaml(id="scratch", name="Scratch", context=proj_row.get("context"))
+            ctx = lite_repo_context(py, hub=hub)
+        console.print("[dim]no project here — using scratch project. /project to switch or create one.[/dim]")
 
     if show_context:
         console.print(render_context(ctx, token_budget=budget))
@@ -219,10 +247,29 @@ def code(
 
 
 @app.command()
-def chat() -> None:
-    """Interactive chat mode, no repo context (not yet implemented)."""
-    console.print("[yellow]`baird chat` is not yet implemented (Phase 3)[/yellow]")
-    raise typer.Exit(1)
+def chat(
+    model: str | None = typer.Option(None, "--model", "-m"),
+    session: str | None = typer.Option(None, "--session"),
+    tui: bool = typer.Option(True, "--tui/--no-tui"),
+) -> None:
+    """Free-form chat — runs `baird code` against the scratch project.
+
+    Use `/project <id>` mid-session to switch into a real project, or
+    `/project new <id>` to create one from inside the chat.
+    """
+    # Delegate by invoking code() with project=None and no .baird/project.yaml
+    # in cwd → the scratch fall-through kicks in. We can't easily call the
+    # Typer command directly with options, so inline the same logic with
+    # project="scratch" forced.
+    code(  # type: ignore[arg-type]
+        show_context=False,
+        file=[],
+        budget=6000,
+        model=model,
+        session=session,
+        project="scratch",
+        tui=tui,
+    )
 
 
 # ----- status / logs / ps / registry -----

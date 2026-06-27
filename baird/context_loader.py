@@ -46,7 +46,7 @@ DEFAULT_TOKEN_BUDGET = 6000
 @dataclass
 class RepoContext:
     project: ProjectYaml
-    project_root: Path
+    project_root: Path | None
     branch: str | None
     git_log_lines: list[str] = field(default_factory=list)
     git_status: str = ""
@@ -198,6 +198,47 @@ def load_repo_context(
     )
 
 
+def lite_repo_context(
+    project: ProjectYaml,
+    *,
+    hub: HubClient | None = None,
+    host_id: str | None = None,
+    n_decisions: int = 5,
+    n_action_summaries: int = 5,
+) -> RepoContext:
+    """RepoContext for a project without a local repo checkout.
+
+    Used by `baird code --project <id>`, the scratch project, and the
+    `/project` slash-command switch. Pulls decisions and action summaries
+    from the hub if available; skips git/tree/file gathering entirely.
+    """
+    decisions: list[dict] = []
+    summaries: list[dict] = []
+    if hub is not None:
+        try:
+            decisions = hub.list_decisions(project.id, limit=n_decisions)
+        except Exception:
+            decisions = []
+        try:
+            actions = hub.list_actions(project_id=project.id, limit=n_action_summaries * 3)
+            summaries = [a for a in actions if a.get("summary")][:n_action_summaries]
+        except Exception:
+            summaries = []
+    return RepoContext(
+        project=project,
+        project_root=None,
+        branch=None,
+        git_log_lines=[],
+        git_status="",
+        tree="",
+        relevant_files={},
+        decisions=decisions,
+        action_summaries=summaries,
+        rules_summary=_rules_summary(project),
+        host_id=host_id or os.uname().nodename,
+    )
+
+
 # ---- Rendering ---------------------------------------------------------
 
 
@@ -218,7 +259,7 @@ def render_context(ctx: RepoContext, *, token_budget: int = DEFAULT_TOKEN_BUDGET
             "\n".join([
                 f"# Project: {ctx.project.name} ({ctx.project.id})",
                 f"Host: {ctx.host_id}",
-                f"Root: {ctx.project_root}",
+                f"Root: {ctx.project_root or '(no local checkout)'}",
                 f"Branch: {ctx.branch or '(detached)'}",
                 f"GitHub: {ctx.project.github or '(none)'}",
             ]),

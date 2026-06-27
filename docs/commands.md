@@ -17,12 +17,12 @@ Bare `baird` (no args) prints a context-aware hint based on cwd, then help.
 
 | Command | What it does |
 |---|---|
-| `baird code [--show-context] [-f <file>] [--budget N]` | Multi-turn REPL with diff approval. `--show-context` prints the per-turn context and exits. |
-| `baird chat` | Free-form chat (no project context). _Not yet implemented — use `baird code` outside a project for now._ |
+| `baird code [--show-context] [-f <file>] [--budget N] [--project <id>] [--tui/--no-tui]` | Multi-turn REPL with diff approval. With no `--project` and no `.baird/project.yaml` in cwd, falls into the **scratch project** (chat-style, no diff loop). `--project <id>` runs against a hub-tracked project without needing a local checkout. |
+| `baird chat` | Alias for `baird code --project scratch`. Free-form, no repo context. |
 | `baird diff apply <patch> -m <msg> [--repo --action-id]` | Apply a unified diff file as a BAIRD-trailered git commit |
 | `baird undo [--repo]` | Revert the last BAIRD commit via `git revert` |
 
-REPL slash-commands inside `baird code`: `/exit`, `/quit`, `/context`, `/reset`, `/cost`, `/model [id]`, `/sessions`, `/no-diff`, `/help`. `/model` with no argument prints the current model and a numbered list of popular OpenRouter models; `/model <id-or-index>` switches mid-session. `/sessions` lists the project's prior sessions so you can resume one with `baird code --session <id>`. A bare `"""` line opens a heredoc-style multi-line input block; another `"""` closes it.
+REPL slash-commands inside `baird code`: `/exit`, `/quit`, `/context`, `/reset`, `/cost`, `/model [id]`, `/sessions`, `/project [id|new <id> [name]]`, `/no-diff`, `/help`. `/project` with no arg lists hub projects and marks the active one; `/project <id>` switches the conversation to that project (new session, lite context — no local repo); `/project new <id> [name]` creates a project on the hub and switches to it. `/model` with no argument prints the current model and a numbered list of popular OpenRouter models; `/model <id-or-index>` switches mid-session. `/sessions` lists the project's prior sessions so you can resume one with `baird code --session <id>`. A bare `"""` line opens a heredoc-style multi-line input block; another `"""` closes it.
 
 ## Tasks
 
