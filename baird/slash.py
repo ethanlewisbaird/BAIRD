@@ -197,6 +197,8 @@ def cmd_host_edit(parts: list[str], ctx: SlashContext) -> SlashResult:
             known.setdefault("host", pos[0])
         if len(pos) >= 2:
             known.setdefault("path", pos[1])
+    if "host" not in known and ctx.active_host:
+        known["host"] = ctx.active_host
     fields = [
         FormField("host", "satellite host_id", required=True),
         FormField("path", "new watch root path", required=True, validator=_absolute_path),

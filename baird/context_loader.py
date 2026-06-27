@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from .memory_client import HubClient
-from .project_yaml import ProjectYaml, load_project_yaml
+from .project_yaml import Location, ProjectYaml, effective_locations, load_project_yaml
 
 
 ALWAYS_INCLUDE = [
@@ -56,6 +56,7 @@ class RepoContext:
     action_summaries: list[dict] = field(default_factory=list)
     rules_summary: list[str] = field(default_factory=list)
     host_id: str | None = None
+    locations: list[Location] = field(default_factory=list)
 
 
 # ---- Gather helpers ----------------------------------------------------
@@ -141,6 +142,22 @@ def _read_relevant(root: Path, paths: list[str], max_per_file_chars: int = 4000)
     return out
 
 
+def _load_locations(project: ProjectYaml, hub: HubClient | None) -> list[Location]:
+    """Prefer hub-side locations (they're the canonical source post-Slice A);
+    fall back to whatever's in the project yaml (which may be the legacy
+    `checkout_hosts` field) when the hub is unreachable."""
+    if hub is not None:
+        try:
+            rows = hub.list_project_locations(project.id)
+            return [
+                Location(host=r["host"], path=r["path"], role=r.get("role"))
+                for r in rows
+            ]
+        except Exception:
+            pass
+    return effective_locations(project)
+
+
 def _rules_summary(project: ProjectYaml) -> list[str]:
     return [f"[{r.severity}] {r.id}: {r.description}" for r in project.rules]
 
@@ -195,6 +212,7 @@ def load_repo_context(
         action_summaries=summaries,
         rules_summary=_rules_summary(project),
         host_id=host_id or os.uname().nodename,
+        locations=_load_locations(project, hub),
     )
 
 
@@ -236,6 +254,7 @@ def lite_repo_context(
         action_summaries=summaries,
         rules_summary=_rules_summary(project),
         host_id=host_id or os.uname().nodename,
+        locations=_load_locations(project, hub),
     )
 
 
@@ -267,6 +286,18 @@ def render_context(ctx: RepoContext, *, token_budget: int = DEFAULT_TOKEN_BUDGET
     )
 
     sections.append(("context", f"## Context\n\n{ctx.project.context or '(no context paragraph)'}"))
+
+    if ctx.locations:
+        loc_lines = [
+            f"- `{loc.host}:{loc.path}`" + (f" — {loc.role}" if loc.role else "")
+            for loc in ctx.locations
+        ]
+        sections.append((
+            "locations",
+            "## Locations\n\nProject spans these (host, path) pairs. Remote tool calls "
+            "(read_remote/write_remote/run_on/...) need a `host` argument matching one "
+            "of these host_ids:\n\n" + "\n".join(loc_lines),
+        ))
 
     if ctx.project.goals:
         goal_lines = [f"- [{g.status}] {g.text}" for g in ctx.project.goals]
