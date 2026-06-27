@@ -64,7 +64,7 @@ class WatchdogDaemon:
     def __init__(self, cfg: HostConfig, hub: HubClient | None = None) -> None:
         self.cfg = cfg
         self.scope = ScopeFilter(cfg.watch.deny)
-        self.hub = hub or HubClient(cfg.hub_url, cfg.auth_token)
+        self.hub = hub or HubClient(cfg.hub_url, cfg.effective_hub_token())
 
         # Resolved mount paths for volume lookup, longest-prefix wins so that
         # nested volumes (e.g. cluster:/work and cluster:/work/scratch) resolve

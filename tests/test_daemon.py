@@ -66,6 +66,25 @@ def watch_dir(tmp_path: Path) -> Path:
     return d
 
 
+# ---- HubClient auth bearer selection -------------------------------------
+
+
+def test_daemon_uses_hub_auth_token_when_set() -> None:
+    """Regression: WatchdogDaemon must call effective_hub_token(), not raw
+    auth_token. On satellites the inbound executor token (auth_token) and the
+    outbound hub bearer (hub_auth_token) are different — sending the inbound
+    one (or null) to the hub gives 401."""
+    cfg = HostConfig(
+        host_id="testhost",
+        hub_url="http://test",
+        auth_token=None,
+        hub_auth_token="real-hub-bearer",
+    )
+    daemon = WatchdogDaemon(cfg)
+    sent = daemon.hub._client.headers.get("Authorization")  # type: ignore[attr-defined]
+    assert sent == "Bearer real-hub-bearer"
+
+
 # ---- Path → volume mapping (no hub needed) -------------------------------
 
 
