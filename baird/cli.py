@@ -767,6 +767,9 @@ def snakemake(
     workflow: Path = typer.Argument(..., exists=True, readable=True),
     cwd: Path = typer.Option(None, "--cwd"),
     project: str | None = typer.Option(None, "--project"),
+    live: bool = typer.Option(
+        False, "--live", help="Stream progress; post a logged inbox row every 10%"
+    ),
     extra: list[str] = typer.Argument(None, help="Extra snakemake args (after --)"),
 ) -> None:
     """Run a Snakemake workflow and post the result back to the hub."""
@@ -779,6 +782,7 @@ def snakemake(
             cwd=cwd,
             hub=hub,
             project_id=project,
+            live=live,
         )
     console.print(res.summary)
     raise typer.Exit(res.exit_code)

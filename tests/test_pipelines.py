@@ -40,6 +40,54 @@ def test_snakemake_success_parses_progress_line(client: TestClient, tmp_path: Pa
     assert "snakemake" in (action["summary"] or "")
 
 
+def test_snakemake_live_mode_emits_progress(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """In --live mode, on_progress fires for each X-of-Y line and notifier
+    gets a 'logged' inbox row at 10% boundaries (throttled)."""
+    wf = tmp_path / "Snakefile"
+    wf.write_text("rule all: input: []\n")
+
+    lines = [
+        ("out", "Building DAG of jobs..."),
+        ("out", "1 of 10 steps (10%) done"),
+        ("out", "2 of 10 steps (20%) done"),
+        ("out", "Running rule build_index"),
+        ("out", "10 of 10 steps (100%) done"),
+    ]
+
+    def streaming(argv, cwd, on_line):
+        for kind, line in lines:
+            on_line(kind, line)
+        full = "\n".join(line for _, line in lines)
+        return 0, full, ""
+
+    progress: list[dict] = []
+
+    transport = FakeTelegramTransport()
+    notifier = Notifier(
+        hub=_Hub(client),
+        telegram=TelegramConfig(bot_token=None, chat_id=None),
+        transport=transport,
+    )
+
+    res = snakemake_run(
+        workflow=wf,
+        hub=_Hub(client),
+        notifier=notifier,
+        live=True,
+        on_progress=progress.append,
+        streaming_runner=streaming,
+    )
+    assert res.exit_code == 0
+    # Three progress lines parsed.
+    assert [p["percent"] for p in progress] == [10, 20, 100]
+    # The notifier records (10, 20, 100) — three distinct 10%-buckets.
+    inbox = _Hub(client).list_notifications()
+    logged_rows = [n for n in inbox if n["kind"] == "logged"]
+    assert len(logged_rows) >= 3
+
+
 def test_snakemake_failure_notifies_failure(client: TestClient, tmp_path: Path) -> None:
     wf = tmp_path / "Snakefile"
     wf.write_text("rule all: input: []\n")
