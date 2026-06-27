@@ -30,9 +30,8 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from rich.console import Console
-from rich.layout import Layout
-from rich.live import Live
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.text import Text
 
@@ -84,31 +83,10 @@ def run_tui_repl(
             mode="code",
         )
 
-    # In-memory conversation log for the panel. Capped so a long session
-    # doesn't blow memory; the model still sees the full history via the
-    # context compressor.
-    panel_log: list[Text] = []
-
-    layout = _make_layout()
     iterator: Optional[Iterable[str]] = iter(inputs) if inputs is not None else None
-    # Tests pass `inputs=`; in that case skip the Live display entirely so the
-    # test runs deterministically without ANSI escape noise.
-    use_live = inputs is None
-
-    def _refresh(live: Optional[Live]) -> None:
-        layout["header"].update(_render_header(repo_ctx, host_id, session, config))
-        layout["panel"].update(_render_panel(panel_log))
-        layout["status"].update(_render_status(stats, config))
-        if live is not None:
-            live.refresh()
 
     def _print(line: Text | str) -> None:
-        if isinstance(line, str):
-            line = Text(line)
-        panel_log.append(line)
-        # Keep ~200 lines in the panel to bound memory.
-        if len(panel_log) > 200:
-            del panel_log[: len(panel_log) - 200]
+        console.print(line)
 
     def _maybe_input(prompt: str) -> str:
         if iterator is not None:
@@ -118,17 +96,17 @@ def run_tui_repl(
                 raise EOFError
         return console.input(prompt)
 
-    _print(Text(f"baird code — {config.project_id} — session={session['id'][:8]}", style="green"))
-    _print(Text("/help for commands, /exit to quit", style="dim"))
+    console.print(_render_header(repo_ctx, host_id, session, config))
+    console.print(Text(
+        f"baird code — {config.project_id} — session={session['id'][:8]}",
+        style="green",
+    ))
+    console.print(Text("/help for commands, /exit to quit", style="dim"))
 
-    live = Live(layout, console=console, refresh_per_second=4, screen=False) if use_live else None
-    if live:
-        live.start()
     try:
         while True:
-            _refresh(live)
             try:
-                raw = _maybe_input("[bold]user[/bold]> ")
+                raw = _maybe_input("\n[bold cyan]user[/bold cyan]> ")
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 break
@@ -203,15 +181,13 @@ def run_tui_repl(
                 _print(Text(f"unknown command: /{cmd} (try /help)", style="red"))
                 continue
 
-            _print(Text(f"user> {line}", style="bold cyan"))
-
-            # Streaming: append a placeholder Text the chunks accumulate into.
-            stream_buf = Text()
-            panel_log.append(stream_buf)
+            console.print(Rule(style="dim"))
+            streamed_any = False
 
             def _on_chunk(delta: str) -> None:
-                stream_buf.append(delta)
-                _refresh(live)
+                nonlocal streamed_any
+                streamed_any = True
+                console.out(delta, end="", highlight=False)
 
             try:
                 completion = _one_turn(
@@ -227,30 +203,21 @@ def run_tui_repl(
             except ModelError as e:
                 _print(Text(f"model error: {e}", style="red"))
                 continue
-            # Stream buffer holds the full content already; no extra _print
-            # for the message body. (Falls back gracefully if streaming
-            # transport doesn't actually stream — buffer ends up empty and
-            # we render completion.content below.)
-            if not str(stream_buf):
-                stream_buf.append(completion.content)
-            _print(Text(
-                f"model={completion.model}  "
-                f"tokens={completion.usage.input_tokens}→{completion.usage.output_tokens}  "
-                f"cost=${completion.cost_usd:.4f}",
-                style="dim",
-            ))
+            if streamed_any:
+                console.print()
+            else:
+                console.print(completion.content)
             stats.turns += 1
             stats.total_cost_usd += completion.cost_usd
             stats.total_input_tokens += completion.usage.input_tokens
             stats.total_output_tokens += completion.usage.output_tokens
+            console.print(_render_status(stats, config, completion))
 
             if diff_loop_active and config.project_root is not None:
                 _handle_diff_blocks_tui(
                     completion.content,
                     project_root=config.project_root,
                     console=console,
-                    live=live,
-                    refresh=lambda: _refresh(live),
                     print_=_print,
                 )
 
@@ -259,25 +226,13 @@ def run_tui_repl(
             f"total=${stats.total_cost_usd:.4f}",
             style="dim",
         ))
-        _refresh(live)
     finally:
-        if live:
-            live.stop()
+        pass
 
     return stats
 
 
-# ---------- layout pieces -----------------------------------------------
-
-
-def _make_layout() -> Layout:
-    layout = Layout()
-    layout.split_column(
-        Layout(name="header", size=3),
-        Layout(name="panel", ratio=1),
-        Layout(name="status", size=3),
-    )
-    return layout
+# ---------- header / status panels --------------------------------------
 
 
 def _render_header(ctx: RepoContext, host_id, session, config: ReplConfig) -> Panel:
@@ -291,20 +246,18 @@ def _render_header(ctx: RepoContext, host_id, session, config: ReplConfig) -> Pa
     return Panel(body, border_style="green", padding=(0, 1))
 
 
-def _render_panel(log: list[Text]) -> Panel:
-    body = Text()
-    for line in log[-100:]:
-        body.append_text(line)
-        body.append("\n")
-    return Panel(body, border_style="white", padding=(0, 1))
-
-
-def _render_status(stats: ReplStats, config: ReplConfig) -> Panel:
+def _render_status(stats: ReplStats, config: ReplConfig, completion=None) -> Panel:
+    last = ""
+    if completion is not None:
+        last = (
+            f"  last: {completion.usage.input_tokens}→{completion.usage.output_tokens}"
+            f" tok / ${completion.cost_usd:.4f}"
+        )
     body = (
         f"turns: [cyan]{stats.turns}[/cyan]  "
         f"cost: [yellow]${stats.total_cost_usd:.4f}[/yellow]  "
-        f"tokens: {stats.total_input_tokens}→{stats.total_output_tokens}  "
-        f"model: [dim]{config.model}[/dim]"
+        f"tokens: {stats.total_input_tokens}→{stats.total_output_tokens}"
+        f"{last}"
     )
     return Panel(body, border_style="blue", padding=(0, 1))
 
@@ -353,30 +306,20 @@ def _handle_diff_blocks_tui(
     *,
     project_root: Path,
     console: Console,
-    live: Optional[Live],
-    refresh,
     print_,
 ) -> None:
     blocks = extract_diff_blocks(content)
     if not blocks:
         return
     for i, diff in enumerate(blocks, 1):
-        # Modal: render the diff as a Panel above the conversation. Read one
-        # keystroke. y applies; n skips; e opens $EDITOR; q exits the loop.
         syntax = Syntax(diff, "diff", theme="monokai", line_numbers=False)
         modal = Panel(
             syntax,
             title=f"diff {i}/{len(blocks)}  —  apply? [y/N/e/q]",
             border_style="yellow",
         )
-        if live is not None:
-            live.stop()
-        try:
-            console.print(modal)
-            choice = read_key("ynqe")
-        finally:
-            if live is not None:
-                live.start()
+        console.print(modal)
+        choice = read_key("ynqe")
         if choice == "q":
             print_(Text("exiting diff loop", style="yellow"))
             return
