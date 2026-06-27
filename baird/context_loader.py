@@ -261,6 +261,25 @@ def lite_repo_context(
 # ---- Rendering ---------------------------------------------------------
 
 
+# Placeholder for the header when a project has no locations attached. The
+# previous behaviour was to fall through to `ctx.host_id` (the hub's own
+# hostname), which made the model believe the project lived on the hub.
+NO_LOCATIONS_PLACEHOLDER = "(no locations set — use /project add-location)"
+
+
+def project_host_for_display(ctx: RepoContext) -> str:
+    """The host string to show in the project header.
+
+    When the project has any locations attached, use the first one's host
+    (treat it as the "active" or default location for surfacing purposes).
+    When there are none, render an explicit placeholder so neither the user
+    nor the model mistakes the hub's hostname for the project's location.
+    """
+    if ctx.locations:
+        return ctx.locations[0].host
+    return NO_LOCATIONS_PLACEHOLDER
+
+
 def render_context(ctx: RepoContext, *, token_budget: int = DEFAULT_TOKEN_BUDGET) -> str:
     """Render a RepoContext as a markdown block. Drops sections in priority
     order if the result would exceed `token_budget` (approx: 1 token ≈ 0.75 words).
@@ -277,7 +296,7 @@ def render_context(ctx: RepoContext, *, token_budget: int = DEFAULT_TOKEN_BUDGET
             "header",
             "\n".join([
                 f"# Project: {ctx.project.name} ({ctx.project.id})",
-                f"Host: {ctx.host_id}",
+                f"Host: {project_host_for_display(ctx)}",
                 f"Root: {ctx.project_root or '(no local checkout)'}",
                 f"Branch: {ctx.branch or '(detached)'}",
                 f"GitHub: {ctx.project.github or '(none)'}",
