@@ -251,6 +251,44 @@ def test_repl_session_resume_loads_existing(
     assert "prior reply" in sent_contents
 
 
+def test_repl_audit_satellite_hands_off_to_model(
+    tmp_path: Path, client: TestClient
+) -> None:
+    """Regression: `/audit-satellite <host> <path>` must inject its prompt as
+    a user turn, NOT fall through to the legacy slash chain. Before the fix
+    the audit prompt started with "Audit ..." and was re-parsed as `/udit`,
+    landing on `unknown command: /udit`. After the fix, the model is called
+    with the audit prompt and the unknown-command path never fires.
+    """
+    hub = _Hub(client)
+    hub.upsert_project(id="p-audit", name="p-audit")
+    console = Console(record=True, width=120)
+    # Capture what we send to the model so we can assert on it.
+    sent: list[str] = []
+    def _t(req):
+        # Last message in the request is the user turn for this round.
+        sent.append(req["body"]["messages"][-1]["content"])
+        return {
+            "choices": [{"message": {"content": "audit reply"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.0001},
+        }
+    model_client = OpenRouterClient(transport=_t)
+    stats = run_repl(
+        repo_ctx=_ctx(tmp_path),
+        hub=hub,
+        model_client=model_client,
+        config=ReplConfig(project_id="p-audit"),
+        console=console,
+        inputs=["/audit-satellite workstation /data/raw", "/exit"],
+    )
+    assert stats.turns == 1
+    assert sent, "the model should have been called with the audit prompt"
+    assert "/data/raw" in sent[-1] and "workstation" in sent[-1]
+    out = console.export_text()
+    assert "unknown command" not in out
+    assert "audit reply" in out
+
+
 def test_repl_records_action_per_turn(tmp_path: Path, client: TestClient) -> None:
     hub = _Hub(client)
     console = Console(record=True, width=120)

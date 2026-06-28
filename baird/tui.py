@@ -279,123 +279,127 @@ def run_tui_repl(
                     else:
                         continue
 
-                cmd = line[1:].split()[0].lower()
-                if cmd in {"exit", "quit"}:
-                    break
-                if cmd == "context":
-                    _print(Text(rendered, style="dim"))
-                    continue
-                if cmd == "reset":
-                    session = hub.new_session(
-                        mode="code",
-                        project_id=config.project_id,
-                        task_id=f"repl-{config.project_id}",
-                    )
-                    _print(Text(f"new session {session['id'][:8]}", style="yellow"))
-                    continue
-                if cmd == "cost":
-                    _print(Text(
-                        f"turns={stats.turns}  cost=${stats.total_cost_usd:.4f}  "
-                        f"tokens={stats.total_input_tokens}→{stats.total_output_tokens}",
-                        style="dim",
-                    ))
-                    continue
-                if cmd in {"no-diff", "nodiff"}:
-                    diff_loop_active = False
-                    _print(Text("diff prompts disabled for this session", style="yellow"))
-                    continue
-                if cmd == "model":
-                    _handle_model_cmd(line, config, model_picker_cache, console, _print)
-                    continue
-                if cmd == "project":
-                    from .context_loader import lite_repo_context
-                    from .project_yaml import ProjectYaml
+                handed_off = False
+                if slash_res is not None and slash_res.next_user_prompt:
+                    handed_off = True
+                if not handed_off:
+                    cmd = line[1:].split()[0].lower()
+                    if cmd in {"exit", "quit"}:
+                        break
+                    if cmd == "context":
+                        _print(Text(rendered, style="dim"))
+                        continue
+                    if cmd == "reset":
+                        session = hub.new_session(
+                            mode="code",
+                            project_id=config.project_id,
+                            task_id=f"repl-{config.project_id}",
+                        )
+                        _print(Text(f"new session {session['id'][:8]}", style="yellow"))
+                        continue
+                    if cmd == "cost":
+                        _print(Text(
+                            f"turns={stats.turns}  cost=${stats.total_cost_usd:.4f}  "
+                            f"tokens={stats.total_input_tokens}→{stats.total_output_tokens}",
+                            style="dim",
+                        ))
+                        continue
+                    if cmd in {"no-diff", "nodiff"}:
+                        diff_loop_active = False
+                        _print(Text("diff prompts disabled for this session", style="yellow"))
+                        continue
+                    if cmd == "model":
+                        _handle_model_cmd(line, config, model_picker_cache, console, _print)
+                        continue
+                    if cmd == "project":
+                        from .context_loader import lite_repo_context
+                        from .project_yaml import ProjectYaml
 
-                    parts = line.split()
-                    if len(parts) == 1:
-                        rows = hub.list_projects()
-                        if not rows:
-                            _print(Text("no projects on the hub", style="dim"))
+                        parts = line.split()
+                        if len(parts) == 1:
+                            rows = hub.list_projects()
+                            if not rows:
+                                _print(Text("no projects on the hub", style="dim"))
+                            else:
+                                for r in rows:
+                                    marker = "*" if r["id"] == config.project_id else " "
+                                    _print(Text(f" {marker} {r['id']}  {r.get('name','')}", style="cyan"))
+                                _print(Text("switch: /project <id>   create: /project new <id> [name]", style="dim"))
+                            continue
+                        sub = parts[1]
+                        if sub == "new":
+                            if len(parts) < 3:
+                                _print(Text("usage: /project new <id> [name]", style="red"))
+                                continue
+                            new_id = parts[2]
+                            new_name = " ".join(parts[3:]) if len(parts) > 3 else new_id
+                            try:
+                                hub.upsert_project(id=new_id, name=new_name)
+                            except Exception as e:
+                                _print(Text(f"create failed: {e}", style="red"))
+                                continue
+                            _print(Text(f"created project {new_id}", style="green"))
+                            target_id = new_id
                         else:
-                            for r in rows:
-                                marker = "*" if r["id"] == config.project_id else " "
-                                _print(Text(f" {marker} {r['id']}  {r.get('name','')}", style="cyan"))
-                            _print(Text("switch: /project <id>   create: /project new <id> [name]", style="dim"))
-                        continue
-                    sub = parts[1]
-                    if sub == "new":
-                        if len(parts) < 3:
-                            _print(Text("usage: /project new <id> [name]", style="red"))
-                            continue
-                        new_id = parts[2]
-                        new_name = " ".join(parts[3:]) if len(parts) > 3 else new_id
+                            target_id = sub
                         try:
-                            hub.upsert_project(id=new_id, name=new_name)
+                            proj_row = hub.get_project(target_id)
                         except Exception as e:
-                            _print(Text(f"create failed: {e}", style="red"))
+                            _print(Text(f"project '{target_id}' not on hub: {e}", style="red"))
                             continue
-                        _print(Text(f"created project {new_id}", style="green"))
-                        target_id = new_id
-                    else:
-                        target_id = sub
-                    try:
-                        proj_row = hub.get_project(target_id)
-                    except Exception as e:
-                        _print(Text(f"project '{target_id}' not on hub: {e}", style="red"))
+                        py = ProjectYaml(
+                            id=proj_row["id"],
+                            name=proj_row.get("name") or proj_row["id"],
+                            github=proj_row.get("github"),
+                            context=proj_row.get("context"),
+                            parent_id=proj_row.get("parent_id")
+                            or (proj_row.get("config") or {}).get("parent_id"),
+                        )
+                        repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
+                        rendered = render_context(repo_ctx)
+                        system = _system_prompt(rendered)
+                        config.project_id = target_id
+                        config.project_root = None
+                        session = hub.find_or_create_session_for_task(
+                            task_id=f"repl-{target_id}",
+                            project_id=target_id,
+                            mode="code",
+                        )
+                        console.print(_render_header(repo_ctx, host_id, session, config))
+                        _print(Text(
+                            f"switched to project {target_id}  session={session['id'][:8]}",
+                            style="yellow",
+                        ))
                         continue
-                    py = ProjectYaml(
-                        id=proj_row["id"],
-                        name=proj_row.get("name") or proj_row["id"],
-                        github=proj_row.get("github"),
-                        context=proj_row.get("context"),
-                        parent_id=proj_row.get("parent_id")
-                        or (proj_row.get("config") or {}).get("parent_id"),
-                    )
-                    repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
-                    rendered = render_context(repo_ctx)
-                    system = _system_prompt(rendered)
-                    config.project_id = target_id
-                    config.project_root = None
-                    session = hub.find_or_create_session_for_task(
-                        task_id=f"repl-{target_id}",
-                        project_id=target_id,
-                        mode="code",
-                    )
-                    console.print(_render_header(repo_ctx, host_id, session, config))
-                    _print(Text(
-                        f"switched to project {target_id}  session={session['id'][:8]}",
-                        style="yellow",
-                    ))
-                    continue
-                if cmd == "sessions":
-                    rows = hub.list_sessions(project_id=config.project_id, limit=20)
-                    if not rows:
-                        _print(Text("no prior sessions for this project", style="dim"))
-                    else:
-                        _print(Text(f"sessions for {config.project_id}", style="dim"))
-                        for r in rows:
-                            marker = "*" if r["id"] == session["id"] else " "
-                            _print(Text(
-                                f" {marker} {r['id'][:8]}  {r.get('mode','?')}  "
-                                f"started={r.get('started_at','')[:19]}",
-                                style="dim",
-                            ))
-                    continue
-                if cmd == "help":
-                    from .slash import commands as _slash_cmds
+                    if cmd == "sessions":
+                        rows = hub.list_sessions(project_id=config.project_id, limit=20)
+                        if not rows:
+                            _print(Text("no prior sessions for this project", style="dim"))
+                        else:
+                            _print(Text(f"sessions for {config.project_id}", style="dim"))
+                            for r in rows:
+                                marker = "*" if r["id"] == session["id"] else " "
+                                _print(Text(
+                                    f" {marker} {r['id'][:8]}  {r.get('mode','?')}  "
+                                    f"started={r.get('started_at','')[:19]}",
+                                    style="dim",
+                                ))
+                        continue
+                    if cmd == "help":
+                        from .slash import commands as _slash_cmds
 
-                    _print(Text(
-                        "/exit  /context  /reset  /cost  /model [id]  "
-                        "/sessions  /project [id|new <id>]  /no-diff",
-                        style="dim",
-                    ))
-                    _print(Text(
-                        "hub-first: " + "  ".join(f"/{c}" for c in _slash_cmds()),
-                        style="dim",
-                    ))
+                        _print(Text(
+                            "/exit  /context  /reset  /cost  /model [id]  "
+                            "/sessions  /project [id|new <id>]  /no-diff",
+                            style="dim",
+                        ))
+                        _print(Text(
+                            "hub-first: " + "  ".join(f"/{c}" for c in _slash_cmds()),
+                            style="dim",
+                        ))
+                        continue
+                    _print(Text(f"unknown command: /{cmd} (try /help)", style="red"))
                     continue
-                _print(Text(f"unknown command: /{cmd} (try /help)", style="red"))
-                continue
 
             console.print(Rule(style="dim"))
             streamed_any = False

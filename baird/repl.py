@@ -198,164 +198,168 @@ def run_repl(
                 else:
                     continue
 
-            cmd = line[1:].split()[0].lower()
-            if cmd in {"exit", "quit"}:
-                break
-            if cmd == "context":
-                console.print(rendered)
-                continue
-            if cmd == "reset":
-                session = hub.new_session(
-                    mode="code",
-                    project_id=config.project_id,
-                    task_id=f"repl-{config.project_id}",
-                )
-                console.print(f"[yellow]new session[/yellow] {session['id'][:8]}")
-                continue
-            if cmd == "cost":
-                console.print(
-                    f"[dim]turns={stats.turns}  cost=${stats.total_cost_usd:.4f}  "
-                    f"tokens={stats.total_input_tokens}→{stats.total_output_tokens}[/dim]"
-                )
-                continue
-            if cmd in {"no-diff", "nodiff"}:
-                diff_loop_active = False
-                console.print("[yellow]diff prompts disabled for this session[/yellow]")
-                continue
-            if cmd == "model":
-                parts = line.split(maxsplit=1)
-                arg = parts[1].strip() if len(parts) == 2 else ""
-                if not arg:
-                    console.print(f"[dim]current model: {config.model}[/dim]")
-                    try:
-                        from .model import top_openrouter_models
-
-                        picks = top_openrouter_models(n=20)
-                        model_picker_cache = [m.get("id", "") for m in picks]
-                        for i, m in enumerate(picks, 1):
-                            console.print(
-                                f"  [cyan]{i:>2}.[/cyan] {m.get('id','')}"
-                            )
-                        console.print(
-                            "[dim]usage: /model <number> or /model <full-id>[/dim]"
-                        )
-                    except Exception as e:
-                        console.print(
-                            f"[yellow]could not fetch model list ({e}); "
-                            "you can still type /model <full-id>[/yellow]"
-                        )
-                else:
-                    new_model: str | None = None
-                    if arg.isdigit() and model_picker_cache:
-                        idx = int(arg)
-                        if 1 <= idx <= len(model_picker_cache):
-                            new_model = model_picker_cache[idx - 1]
-                        else:
-                            console.print(
-                                f"[red]index {idx} out of range[/red] "
-                                f"(1..{len(model_picker_cache)})"
-                            )
-                    else:
-                        new_model = arg
-                    if new_model:
-                        old = config.model
-                        config.model = new_model
-                        console.print(f"[yellow]model:[/yellow] {old} → {new_model}")
-                continue
-            if cmd == "project":
-                from .context_loader import lite_repo_context
-                from .project_yaml import ProjectYaml
-
-                parts = line.split()
-                if len(parts) == 1:
-                    rows = hub.list_projects()
-                    if not rows:
-                        console.print("[dim]no projects on the hub[/dim]")
-                    else:
-                        for r in rows:
-                            marker = " [green]*[/green]" if r["id"] == config.project_id else "  "
-                            console.print(
-                                f"{marker} [cyan]{r['id']}[/cyan]  {r.get('name','')}"
-                            )
-                        console.print(
-                            "[dim]switch: /project <id>   create: /project new <id> [name][/dim]"
-                        )
+            handed_off = False
+            if slash_res is not None and slash_res.next_user_prompt:
+                handed_off = True
+            if not handed_off:
+                cmd = line[1:].split()[0].lower()
+                if cmd in {"exit", "quit"}:
+                    break
+                if cmd == "context":
+                    console.print(rendered)
                     continue
-                sub = parts[1]
-                if sub == "new":
-                    if len(parts) < 3:
-                        console.print("[red]usage:[/red] /project new <id> [name]")
-                        continue
-                    new_id = parts[2]
-                    new_name = " ".join(parts[3:]) if len(parts) > 3 else new_id
-                    try:
-                        hub.upsert_project(id=new_id, name=new_name)
-                    except Exception as e:
-                        console.print(f"[red]create failed:[/red] {e}")
-                        continue
-                    console.print(f"[green]created project {new_id}[/green]")
-                    target_id = new_id
-                else:
-                    target_id = sub
-                try:
-                    proj_row = hub.get_project(target_id)
-                except Exception as e:
-                    console.print(f"[red]project '{target_id}' not on hub:[/red] {e}")
-                    continue
-                py = ProjectYaml(
-                    id=proj_row["id"],
-                    name=proj_row.get("name") or proj_row["id"],
-                    github=proj_row.get("github"),
-                    context=proj_row.get("context"),
-                    parent_id=proj_row.get("parent_id")
-                    or (proj_row.get("config") or {}).get("parent_id"),
-                )
-                repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
-                rendered = render_context(repo_ctx)
-                system = _system_prompt(rendered)
-                config.project_id = target_id
-                config.project_root = None
-                session = hub.find_or_create_session_for_task(
-                    task_id=f"repl-{target_id}",
-                    project_id=target_id,
-                    mode="code",
-                )
-                console.print(
-                    f"[yellow]switched to project[/yellow] {target_id}  "
-                    f"session={session['id'][:8]}"
-                )
-                continue
-            if cmd == "sessions":
-                rows = hub.list_sessions(project_id=config.project_id, limit=20)
-                if not rows:
-                    console.print("[dim]no prior sessions for this project[/dim]")
-                else:
-                    console.print(f"[dim]sessions for {config.project_id}[/dim]")
-                    for r in rows:
-                        marker = " [green]*[/green]" if r["id"] == session["id"] else "  "
-                        console.print(
-                            f"{marker} {r['id'][:8]}  {r.get('mode','?')}  "
-                            f"started={r.get('started_at','')[:19]}"
-                        )
-                    console.print(
-                        "[dim]resume one with: baird code --session <full-id>[/dim]"
+                if cmd == "reset":
+                    session = hub.new_session(
+                        mode="code",
+                        project_id=config.project_id,
+                        task_id=f"repl-{config.project_id}",
                     )
-                continue
-            if cmd == "help":
-                from .slash import commands as _slash_cmds
+                    console.print(f"[yellow]new session[/yellow] {session['id'][:8]}")
+                    continue
+                if cmd == "cost":
+                    console.print(
+                        f"[dim]turns={stats.turns}  cost=${stats.total_cost_usd:.4f}  "
+                        f"tokens={stats.total_input_tokens}→{stats.total_output_tokens}[/dim]"
+                    )
+                    continue
+                if cmd in {"no-diff", "nodiff"}:
+                    diff_loop_active = False
+                    console.print("[yellow]diff prompts disabled for this session[/yellow]")
+                    continue
+                if cmd == "model":
+                    parts = line.split(maxsplit=1)
+                    arg = parts[1].strip() if len(parts) == 2 else ""
+                    if not arg:
+                        console.print(f"[dim]current model: {config.model}[/dim]")
+                        try:
+                            from .model import top_openrouter_models
 
-                console.print(
-                    "[dim]/exit  /context  /reset  /cost  /model [id]  "
-                    "/sessions  /project [id|new <id>]  /no-diff[/dim]"
-                )
-                console.print(
-                    "[dim]hub-first: "
-                    + "  ".join(f"/{c}" for c in _slash_cmds())
-                    + "[/dim]"
-                )
+                            picks = top_openrouter_models(n=20)
+                            model_picker_cache = [m.get("id", "") for m in picks]
+                            for i, m in enumerate(picks, 1):
+                                console.print(
+                                    f"  [cyan]{i:>2}.[/cyan] {m.get('id','')}"
+                                )
+                            console.print(
+                                "[dim]usage: /model <number> or /model <full-id>[/dim]"
+                            )
+                        except Exception as e:
+                            console.print(
+                                f"[yellow]could not fetch model list ({e}); "
+                                "you can still type /model <full-id>[/yellow]"
+                            )
+                    else:
+                        new_model: str | None = None
+                        if arg.isdigit() and model_picker_cache:
+                            idx = int(arg)
+                            if 1 <= idx <= len(model_picker_cache):
+                                new_model = model_picker_cache[idx - 1]
+                            else:
+                                console.print(
+                                    f"[red]index {idx} out of range[/red] "
+                                    f"(1..{len(model_picker_cache)})"
+                                )
+                        else:
+                            new_model = arg
+                        if new_model:
+                            old = config.model
+                            config.model = new_model
+                            console.print(f"[yellow]model:[/yellow] {old} → {new_model}")
+                    continue
+                if cmd == "project":
+                    from .context_loader import lite_repo_context
+                    from .project_yaml import ProjectYaml
+
+                    parts = line.split()
+                    if len(parts) == 1:
+                        rows = hub.list_projects()
+                        if not rows:
+                            console.print("[dim]no projects on the hub[/dim]")
+                        else:
+                            for r in rows:
+                                marker = " [green]*[/green]" if r["id"] == config.project_id else "  "
+                                console.print(
+                                    f"{marker} [cyan]{r['id']}[/cyan]  {r.get('name','')}"
+                                )
+                            console.print(
+                                "[dim]switch: /project <id>   create: /project new <id> [name][/dim]"
+                            )
+                        continue
+                    sub = parts[1]
+                    if sub == "new":
+                        if len(parts) < 3:
+                            console.print("[red]usage:[/red] /project new <id> [name]")
+                            continue
+                        new_id = parts[2]
+                        new_name = " ".join(parts[3:]) if len(parts) > 3 else new_id
+                        try:
+                            hub.upsert_project(id=new_id, name=new_name)
+                        except Exception as e:
+                            console.print(f"[red]create failed:[/red] {e}")
+                            continue
+                        console.print(f"[green]created project {new_id}[/green]")
+                        target_id = new_id
+                    else:
+                        target_id = sub
+                    try:
+                        proj_row = hub.get_project(target_id)
+                    except Exception as e:
+                        console.print(f"[red]project '{target_id}' not on hub:[/red] {e}")
+                        continue
+                    py = ProjectYaml(
+                        id=proj_row["id"],
+                        name=proj_row.get("name") or proj_row["id"],
+                        github=proj_row.get("github"),
+                        context=proj_row.get("context"),
+                        parent_id=proj_row.get("parent_id")
+                        or (proj_row.get("config") or {}).get("parent_id"),
+                    )
+                    repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
+                    rendered = render_context(repo_ctx)
+                    system = _system_prompt(rendered)
+                    config.project_id = target_id
+                    config.project_root = None
+                    session = hub.find_or_create_session_for_task(
+                        task_id=f"repl-{target_id}",
+                        project_id=target_id,
+                        mode="code",
+                    )
+                    console.print(
+                        f"[yellow]switched to project[/yellow] {target_id}  "
+                        f"session={session['id'][:8]}"
+                    )
+                    continue
+                if cmd == "sessions":
+                    rows = hub.list_sessions(project_id=config.project_id, limit=20)
+                    if not rows:
+                        console.print("[dim]no prior sessions for this project[/dim]")
+                    else:
+                        console.print(f"[dim]sessions for {config.project_id}[/dim]")
+                        for r in rows:
+                            marker = " [green]*[/green]" if r["id"] == session["id"] else "  "
+                            console.print(
+                                f"{marker} {r['id'][:8]}  {r.get('mode','?')}  "
+                                f"started={r.get('started_at','')[:19]}"
+                            )
+                        console.print(
+                            "[dim]resume one with: baird code --session <full-id>[/dim]"
+                        )
+                    continue
+                if cmd == "help":
+                    from .slash import commands as _slash_cmds
+
+                    console.print(
+                        "[dim]/exit  /context  /reset  /cost  /model [id]  "
+                        "/sessions  /project [id|new <id>]  /no-diff[/dim]"
+                    )
+                    console.print(
+                        "[dim]hub-first: "
+                        + "  ".join(f"/{c}" for c in _slash_cmds())
+                        + "[/dim]"
+                    )
+                    continue
+                console.print(f"[red]unknown command:[/red] /{cmd} (try /help)")
                 continue
-            console.print(f"[red]unknown command:[/red] /{cmd} (try /help)")
-            continue
 
         try:
             completion = _one_turn(
