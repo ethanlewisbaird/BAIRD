@@ -600,3 +600,69 @@ def test_project_new_rejects_flag_value() -> None:
     assert r.handled and not r.ok
     assert "flag-looking value" in r.output or "unparsed flag" in r.output
     hub.upsert_project.assert_not_called()
+
+
+# ---- /audit-satellite ------------------------------------------------
+
+
+def test_audit_satellite_inline_args_build_prompt() -> None:
+    """`/audit-satellite workstation /data/raw` should produce a next_user_prompt
+    naming the host + path, and NOT call any tools (the model does the scan)."""
+    ctx, hub, exec_ = _ctx(answers=[])
+    r = try_dispatch("audit-satellite workstation /data/raw", ctx)
+    assert r.handled and r.ok
+    assert r.next_user_prompt is not None
+    assert "workstation" in r.next_user_prompt
+    assert "/data/raw" in r.next_user_prompt
+    # The slash command does NO scanning itself — the model handles it.
+    assert exec_.calls == []
+    # The active host should propagate so a follow-up /run picks it up.
+    assert r.active_host == "workstation"
+
+
+def test_audit_satellite_prompts_for_missing_host_and_path() -> None:
+    """No positional args — should form-prompt host then path."""
+    ctx, hub, _ = _ctx(answers=["gpu", "/scratch/proj"])
+    r = try_dispatch("audit-satellite", ctx)
+    assert r.handled and r.ok
+    assert r.next_user_prompt is not None
+    assert "gpu" in r.next_user_prompt
+    assert "/scratch/proj" in r.next_user_prompt
+
+
+def test_audit_satellite_uses_active_host_when_omitted() -> None:
+    """If only a path is given, the active host carries over."""
+    ctx, hub, _ = _ctx(answers=[], active_host="workstation")
+    r = try_dispatch("audit-satellite path=/data/x", ctx)
+    assert r.handled and r.ok
+    assert "workstation" in (r.next_user_prompt or "")
+    assert "/data/x" in (r.next_user_prompt or "")
+
+
+def test_audit_satellite_rejects_relative_path() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    r = try_dispatch("audit-satellite workstation relative/path", ctx)
+    assert r.handled and not r.ok
+    assert "absolute" in r.output
+
+
+def test_audit_satellite_depth_kwarg_clamped() -> None:
+    """`depth=99` should be rejected (out of 1..6)."""
+    ctx, hub, _ = _ctx(answers=[])
+    r = try_dispatch("audit-satellite workstation /data depth=99", ctx)
+    assert r.handled and not r.ok
+    assert "depth" in r.output
+
+
+def test_audit_satellite_depth_default_three() -> None:
+    """No depth specified → depth=3 is mentioned in the find command hint."""
+    ctx, hub, _ = _ctx(answers=[])
+    r = try_dispatch("audit-satellite workstation /data", ctx)
+    assert r.handled and r.ok
+    assert "-maxdepth 3" in (r.next_user_prompt or "")
+
+
+def test_audit_satellite_registered_in_commands() -> None:
+    from baird.slash import commands
+
+    assert "audit-satellite" in commands()
