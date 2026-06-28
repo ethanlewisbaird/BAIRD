@@ -72,7 +72,7 @@ executor_listen: null                  # "0.0.0.0:8765" to expose the executor; 
 
 volumes:                               # one entry per storage volume on this machine
   - id: surface:/home                  # `host:path` style; used as storage_volume in the registry
-    mount: /home/ethan                 # absolute path on this machine
+    mount: /home/user                 # absolute path on this machine
     shared: false                      # true for cluster-shared filesystems
   - id: cluster:/work
     mount: /work
@@ -80,7 +80,7 @@ volumes:                               # one entry per storage volume on this ma
 
 watch:
   roots:                               # what the watchdog scans (recursively)
-    - /home/ethan/projects
+    - /home/user/projects
     - /work/experiments
   deny:                                # gitignore-style patterns to skip
     - "**/.git/**"
@@ -129,15 +129,15 @@ Defaults are reasonable for a single user; you rarely need to edit this.
 Per-project, committed to the repo so it travels with the code. `baird project init <id>` writes a starter version.
 
 ```yaml
-id: scrna-2026
+id: my-project
 name: scRNA pipeline 2026
-github: ethanlewisbaird/scrna-2026
+github: ethanlewisbaird/my-project
 context: |
   Integration of 3 publicly-available scRNA-seq datasets to build a unified atlas.
 
 checkout_hosts:                        # which machines currently have this project cloned
   - host_id: surface
-    path: /home/ethan/projects/scrna-2026
+    path: /home/user/projects/my-project
     branch: main
 
 goals:
@@ -151,7 +151,7 @@ state:
 data_aliases:                          # short names for full volume paths
   - name: raw
     volume: cluster:/work
-    path: scrna-2026/raw
+    path: my-project/raw
 
 rules:                                 # enforceable best-practices
   - id: seeds-set
@@ -211,7 +211,7 @@ runnable:
   prompt: "Summarise what changed in the last 24h and flag anything that looks off."
   model: anthropic/claude-3-haiku
   system: null                         # optional system prompt
-  project_id: scrna-2026               # optional — gates project-context loading
+  project_id: my-project               # optional — gates project-context loading
   context_sources: [repo, decisions, rules]
   max_tokens: 1024
   temperature: 0.2
@@ -245,7 +245,7 @@ trigger:
 # On filesystem change under a path
 trigger:
   type: watch
-  path: ~/projects/scrna-2026/results
+  path: ~/projects/my-project/results
   events: [created, modified]          # created | modified | moved | deleted
 
 # On an in-process event

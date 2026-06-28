@@ -69,7 +69,7 @@ class Runnable(BaseModel):
     # Multi-project tasks: when set, the scheduler resolves this list at fire
     # time and runs the task once per resolved id. Any entry that is a
     # parent in the project hierarchy gets expanded to that parent's children
-    # (cross-cutting tasks like "for each assay under SCENTINEL, do X"). An
+    # (cross-cutting tasks like "for each assay under umbrella programme, do X"). An
     # explicit list of leaf ids runs only against those. When both fields
     # are set, `project_ids` wins; `project_id` stays for back-compat.
     project_ids: list[str] = Field(default_factory=list)

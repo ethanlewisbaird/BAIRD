@@ -670,7 +670,7 @@ def cmd_run_on(parts: list[str], ctx: SlashContext) -> SlashResult:
     The colon separator is required so commands can contain spaces/flags
     without quoting. Falls back to the form for missing pieces."""
     # Re-join then split on the first colon — the user typed
-    # `/run on hibu: ls /data` and parts is ['on', 'hibu:', 'ls', '/data'].
+    # `/run on workstation: ls /data` and parts is ['on', 'workstation:', 'ls', '/data'].
     text = " ".join(parts)
     if text.lower().startswith("on "):
         text = text[3:]

@@ -41,10 +41,10 @@ def test_satellite_dispatch_calls_executor_client(
 ) -> None:
     monkeypatch.setenv("BAIRD_HOME", str(tmp_path))
     (tmp_path / "satellites.json").write_text(json.dumps({
-        "hibu": {
-            "ssh_host": "hibu",
+        "workstation": {
+            "ssh_host": "workstation",
             "local_fwd_port": 8766,
-            "executor_auth_token": "tok-hibu",
+            "executor_auth_token": "tok-workstation",
         }
     }))
 
@@ -64,16 +64,16 @@ def test_satellite_dispatch_calls_executor_client(
         def run_command(self, cmd, **kwargs):
             captured["cmd"] = cmd
             captured["kwargs"] = kwargs
-            return {"exit_code": 0, "stdout": "from hibu", "stderr": "", "tier": "project"}
+            return {"exit_code": 0, "stdout": "from workstation", "stderr": "", "tier": "project"}
 
     monkeypatch.setattr(dispatcher, "ExecutorClient", _StubClient)
 
-    task = _task(host_id="hibu", cmd="ls /tmp")
+    task = _task(host_id="workstation", cmd="ls /tmp")
     res = run_command_task(task, hub=_Hub(client), hub_host_id="surface")
     assert res["exit_code"] == 0
-    assert res["stdout"] == "from hibu"
+    assert res["stdout"] == "from workstation"
     assert captured["base_url"] == "http://127.0.0.1:8766"
-    assert captured["token"] == "tok-hibu"
+    assert captured["token"] == "tok-workstation"
     assert captured["cmd"] == "ls /tmp"
 
 
@@ -166,7 +166,7 @@ def test_apply_diff_satellite_uses_executor_client(
 ) -> None:
     monkeypatch.setenv("BAIRD_HOME", str(tmp_path))
     (tmp_path / "satellites.json").write_text(json.dumps({
-        "hibu": {"ssh_host": "hibu", "local_fwd_port": 8766, "executor_auth_token": "tok"}
+        "workstation": {"ssh_host": "workstation", "local_fwd_port": 8766, "executor_auth_token": "tok"}
     }))
 
     captured: dict = {}
@@ -194,7 +194,7 @@ def test_apply_diff_satellite_uses_executor_client(
         diff="--- a\n+++ b\n",
         commit_message="from hub",
         project_root=tmp_path / "repo",
-        host_id="hibu",
+        host_id="workstation",
     )
     assert out["commit_sha"] == "remote-sha"
     assert captured["base_url"] == "http://127.0.0.1:8766"
@@ -212,7 +212,7 @@ def test_dispatcher_retries_on_connect_error(
 
     monkeypatch.setenv("BAIRD_HOME", str(tmp_path))
     (tmp_path / "satellites.json").write_text(json.dumps({
-        "hibu": {"ssh_host": "hibu", "local_fwd_port": 8766, "executor_auth_token": "tok"}
+        "workstation": {"ssh_host": "workstation", "local_fwd_port": 8766, "executor_auth_token": "tok"}
     }))
 
     calls = {"n": 0}
@@ -241,7 +241,7 @@ def test_dispatcher_retries_on_connect_error(
                 last = e
         raise last  # type: ignore[misc]
 
-    task = _task(host_id="hibu", cmd="ls")
+    task = _task(host_id="workstation", cmd="ls")
     res = run_command_task(task, hub=_Hub(client))
     assert res["exit_code"] == 0
     assert calls["n"] == 3
@@ -251,8 +251,8 @@ def test_render_host_yaml_includes_executor_token() -> None:
     from baird.satellite import EnrollSpec, _render_host_yaml
 
     spec = EnrollSpec(
-        ssh_host="hibu", host_id="hibu", hub_auth_token="ht",
+        ssh_host="workstation", host_id="workstation", hub_auth_token="ht",
     )
-    out = _render_host_yaml(spec, remote_home="/home/ebaird", executor_auth_token="etok")
+    out = _render_host_yaml(spec, remote_home="/home/user", executor_auth_token="etok")
     assert 'auth_token: "etok"' in out
     assert 'hub_auth_token: "ht"' in out

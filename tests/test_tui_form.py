@@ -21,10 +21,10 @@ def test_skips_already_known_fields() -> None:
     ]
     out = collect_form_values(
         fields,
-        {"host": "hibu", "path": "/data"},
+        {"host": "workstation", "path": "/data"},
         input_fn=_stub_input([]),  # no prompts expected
     )
-    assert out == {"host": "hibu", "path": "/data"}
+    assert out == {"host": "workstation", "path": "/data"}
 
 
 def test_prompts_for_missing_required_only() -> None:
@@ -35,10 +35,10 @@ def test_prompts_for_missing_required_only() -> None:
     ]
     out = collect_form_values(
         fields,
-        {"host": "hibu"},
+        {"host": "workstation"},
         input_fn=_stub_input(["/data"]),
     )
-    assert out == {"host": "hibu", "path": "/data"}
+    assert out == {"host": "workstation", "path": "/data"}
     assert "role" not in out  # optional, not asked
 
 

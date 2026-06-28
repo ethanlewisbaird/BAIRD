@@ -62,7 +62,7 @@ def expand_project_ids(hub: HubClient, project_ids: list[str]) -> list[str]:
     """Expand `runnable.project_ids` at fire time.
 
     When an entry is a parent in the project hierarchy, replace it with its
-    children (cross-cutting tasks like "for each assay under SCENTINEL,
+    children (cross-cutting tasks like "for each assay under umbrella programme,
     do X"). Leaf ids (no children) pass through unchanged. Order is
     preserved and duplicates collapsed.
 

@@ -25,7 +25,7 @@ def _stub_satellite_registry(monkeypatch):
     don't pick up the dev machine's real `~/.baird/satellites.json`. The
     fixture is autouse so every test in this module sees the same set."""
     fake = {
-        "hibu": {"local_fwd_port": 8766, "executor_auth_token": "tok"},
+        "workstation": {"local_fwd_port": 8766, "executor_auth_token": "tok"},
         "gpu": {"local_fwd_port": 8767, "executor_auth_token": "tok"},
         "GPU-wrkstn": {"local_fwd_port": 8768, "executor_auth_token": "tok"},
     }
@@ -64,7 +64,7 @@ def _ctx(answers: list[str], active_host: str | None = None):
     exec_ = FakeExecutor()
     env = ToolEnv(
         hub=hub,
-        executors={"hibu": ("http://x", "tok"), "gpu": ("http://y", "tok")},
+        executors={"workstation": ("http://x", "tok"), "gpu": ("http://y", "tok")},
         executor_factory=lambda url, tok: exec_,
     )
     it = iter(answers)
@@ -101,10 +101,10 @@ def test_parse_inline_args_generic_double_dash_flags() -> None:
 
 
 def test_parse_inline_args_equals_form() -> None:
-    pos, kv, err = parse_inline_args(["p", "--name=Spatial", "--parent=scentinel"])
+    pos, kv, err = parse_inline_args(["p", "--name=Spatial", "--parent=umbrella"])
     assert err is None
     assert pos == ["p"]
-    assert kv == {"name": "Spatial", "parent": "scentinel"}
+    assert kv == {"name": "Spatial", "parent": "umbrella"}
 
 
 def test_parse_inline_args_rejects_flag_value() -> None:
@@ -124,23 +124,23 @@ def test_project_new_inline_locations_double_dash_flag() -> None:
     """The exact failing transcript from issue #1: --locations was being
     swallowed into the positional `name` slot. Must land in `locations`."""
     ctx, hub, _ = _ctx(answers=[])
-    hub.list_projects.return_value = [{"id": "scentinel", "name": "S"}]
-    hub.upsert_project.return_value = {"id": "scentinel-spatial"}
+    hub.list_projects.return_value = [{"id": "umbrella", "name": "S"}]
+    hub.upsert_project.return_value = {"id": "umbrella-spatial"}
     hub.add_project_location.return_value = []
     r = try_dispatch(
-        "project new scentinel-spatial --parent scentinel "
+        "project new umbrella-spatial --parent umbrella "
         "--locations GPU-wrkstn:/data-hdd0/Ethan_Baird/Dec25_xenium",
         ctx,
     )
     assert r.handled and r.ok, r.output
     hub.upsert_project.assert_called_once_with(
-        id="scentinel-spatial",
-        name="scentinel-spatial",
+        id="umbrella-spatial",
+        name="umbrella-spatial",
         github=None,
-        parent_id="scentinel",
+        parent_id="umbrella",
     )
     hub.add_project_location.assert_called_once_with(
-        "scentinel-spatial",
+        "umbrella-spatial",
         host="GPU-wrkstn",
         path="/data-hdd0/Ethan_Baird/Dec25_xenium",
         role=None,
@@ -167,14 +167,14 @@ def test_project_add_location_double_dash_flags() -> None:
     """The generic flag parser must also serve /project add-location."""
     ctx, hub, _ = _ctx(answers=[])
     hub.add_project_location.return_value = [
-        {"host": "hibu", "path": "/data", "role": "data"}
+        {"host": "workstation", "path": "/data", "role": "data"}
     ]
     r = try_dispatch(
-        "project add-location scrna --host hibu --path /data --role data", ctx
+        "project add-location scrna --host workstation --path /data --role data", ctx
     )
     assert r.handled and r.ok, r.output
     hub.add_project_location.assert_called_once_with(
-        "scrna", host="hibu", path="/data", role="data"
+        "scrna", host="workstation", path="/data", role="data"
     )
 
 
@@ -203,13 +203,13 @@ def test_project_new_inline_locations_get_added() -> None:
     hub.upsert_project.return_value = {"id": "scrna"}
     hub.add_project_location.return_value = []
     r = try_dispatch(
-        "project new scrna locations=hibu:/data/scrna,gpu:/scratch/scrna", ctx
+        "project new scrna locations=workstation:/data/scrna,gpu:/scratch/scrna", ctx
     )
     assert r.handled and r.ok, r.output
     assert hub.add_project_location.call_count == 2
     calls = [c.kwargs for c in hub.add_project_location.call_args_list]
     hosts = [(c["host"], c["path"]) for c in calls]
-    assert hosts == [("hibu", "/data/scrna"), ("gpu", "/scratch/scrna")]
+    assert hosts == [("workstation", "/data/scrna"), ("gpu", "/scratch/scrna")]
     assert "2 location(s)" in r.output
 
 
@@ -227,7 +227,7 @@ def test_project_new_skips_malformed_location_entries() -> None:
     hub.upsert_project.return_value = {"id": "p"}
     hub.add_project_location.return_value = []
     # Mixed valid + malformed entries — malformed silently skipped.
-    r = try_dispatch("project new p locations=hibu:/data,no-colon,:/no-host,gpu:", ctx)
+    r = try_dispatch("project new p locations=workstation:/data,no-colon,:/no-host,gpu:", ctx)
     assert r.handled and r.ok, r.output
     assert hub.add_project_location.call_count == 1
 
@@ -237,11 +237,11 @@ def test_project_new_skips_malformed_location_entries() -> None:
 
 def test_project_add_location_full_positional() -> None:
     ctx, hub, _ = _ctx(answers=[])
-    hub.add_project_location.return_value = [{"host": "hibu", "path": "/data", "role": "data"}]
-    r = try_dispatch("project add-location scrna hibu /data data", ctx)
+    hub.add_project_location.return_value = [{"host": "workstation", "path": "/data", "role": "data"}]
+    r = try_dispatch("project add-location scrna workstation /data data", ctx)
     assert r.handled and r.ok
     hub.add_project_location.assert_called_once_with(
-        "scrna", host="hibu", path="/data", role="data"
+        "scrna", host="workstation", path="/data", role="data"
     )
 
 
@@ -274,7 +274,7 @@ def test_project_add_location_validates_absolute_path() -> None:
     # First answer "relative" fails, second "/abs" passes.
     ctx, hub, _ = _ctx(answers=["relative", "/abs"])
     hub.add_project_location.return_value = [{"host": "h", "path": "/abs", "role": None}]
-    r = try_dispatch("project add-location scrna hibu", ctx)
+    r = try_dispatch("project add-location scrna workstation", ctx)
     assert r.handled and r.ok
     args = hub.add_project_location.call_args
     assert args.kwargs["path"] == "/abs"
@@ -285,7 +285,7 @@ def test_project_add_location_validates_absolute_path() -> None:
 
 def test_host_edit_sets_watch_root() -> None:
     ctx, _hub, exec_ = _ctx(answers=[])
-    r = try_dispatch("host edit hibu /new/root", ctx)
+    r = try_dispatch("host edit workstation /new/root", ctx)
     assert r.handled and r.ok, r.output
     kinds = [c[0] for c in exec_.calls]
     assert kinds == ["read_file", "write_file", "run_command"]
@@ -300,7 +300,7 @@ def test_where_routes_query() -> None:
     ctx.env.project_id = "scrna"
     hub.get_project.return_value = {"id": "scrna", "config": {"data_aliases": []}}
     hub.list_project_locations.return_value = [
-        {"host": "hibu", "path": "/data/scrna", "role": "data"},
+        {"host": "workstation", "path": "/data/scrna", "role": "data"},
     ]
     r = try_dispatch("where scrna", ctx)
     assert r.handled and r.ok
@@ -311,10 +311,10 @@ def test_where_routes_query() -> None:
 
 def test_run_on_colon_syntax() -> None:
     ctx, _hub, exec_ = _ctx(answers=[])
-    r = try_dispatch("run on hibu: ls /data", ctx)
+    r = try_dispatch("run on workstation: ls /data", ctx)
     assert r.handled and r.ok, r.output
     assert exec_.calls == [("run_command", {"command": "ls /data"})]
-    assert r.active_host == "hibu"
+    assert r.active_host == "workstation"
 
 
 def test_run_uses_active_host_when_no_inline_host() -> None:
@@ -325,16 +325,16 @@ def test_run_uses_active_host_when_no_inline_host() -> None:
 
 
 def test_run_on_falls_through_form_when_missing_command() -> None:
-    # User typed "/run on hibu" with no command — expect a form prompt.
+    # User typed "/run on workstation" with no command — expect a form prompt.
     ctx, _hub, exec_ = _ctx(answers=["pwd"])
-    r = try_dispatch("run on hibu", ctx)
+    r = try_dispatch("run on workstation", ctx)
     assert r.handled and r.ok
     assert exec_.calls == [("run_command", {"command": "pwd"})]
 
 
 def test_run_on_destructive_command_prompts_and_can_cancel() -> None:
     ctx, _hub, exec_ = _ctx(answers=["n"])  # decline destructive prompt
-    r = try_dispatch("run on hibu: pip install foo", ctx)
+    r = try_dispatch("run on workstation: pip install foo", ctx)
     assert r.handled and not r.ok
     assert "cancelled" in r.output
     assert exec_.calls == []  # never ran
@@ -345,14 +345,14 @@ def test_run_on_destructive_command_prompts_and_can_cancel() -> None:
 
 def test_env_install_requires_explicit_confirmation() -> None:
     ctx, _hub, exec_ = _ctx(answers=["numpy\nscipy", "n"])  # env_spec then "n"
-    r = try_dispatch("env install hibu scrna", ctx)
+    r = try_dispatch("env install workstation scrna", ctx)
     assert r.handled and not r.ok
     assert exec_.calls == []
 
 
 def test_env_install_proceeds_on_yes() -> None:
     ctx, _hub, exec_ = _ctx(answers=["numpy\nscipy", "y"])
-    r = try_dispatch("env install hibu scrna", ctx)
+    r = try_dispatch("env install workstation scrna", ctx)
     assert r.handled and r.ok, r.output
     # write_file (reqs.txt) + run_command (pip install)
     assert [c[0] for c in exec_.calls] == ["write_file", "run_command"]
@@ -365,32 +365,32 @@ def test_project_new_inline_parent_flag() -> None:
     """`/project new <id> --parent <pid>` shorthand."""
     ctx, hub, _ = _ctx(answers=[])
     hub.list_projects.return_value = [
-        {"id": "scentinel", "name": "SCENTINEL"},
+        {"id": "umbrella", "name": "umbrella programme"},
     ]
     hub.upsert_project.return_value = {"id": "scrna"}
-    r = try_dispatch("project new scrna --parent scentinel", ctx)
+    r = try_dispatch("project new scrna --parent umbrella", ctx)
     assert r.handled and r.ok, r.output
     hub.upsert_project.assert_called_once_with(
-        id="scrna", name="scrna", github=None, parent_id="scentinel"
+        id="scrna", name="scrna", github=None, parent_id="umbrella"
     )
 
 
 def test_project_new_parent_kv_form() -> None:
     ctx, hub, _ = _ctx(answers=[])
-    hub.list_projects.return_value = [{"id": "scentinel", "name": "SCENTINEL"}]
+    hub.list_projects.return_value = [{"id": "umbrella", "name": "umbrella programme"}]
     hub.upsert_project.return_value = {"id": "scrna"}
-    r = try_dispatch("project new scrna parent=scentinel", ctx)
+    r = try_dispatch("project new scrna parent=umbrella", ctx)
     assert r.handled and r.ok, r.output
-    assert hub.upsert_project.call_args.kwargs["parent_id"] == "scentinel"
+    assert hub.upsert_project.call_args.kwargs["parent_id"] == "umbrella"
 
 
 def test_project_new_unknown_parent_suggests_closest() -> None:
     ctx, hub, _ = _ctx(answers=[])
-    hub.list_projects.return_value = [{"id": "scentinel", "name": "S"}]
+    hub.list_projects.return_value = [{"id": "umbrella", "name": "S"}]
     r = try_dispatch("project new scrna --parent scintenel", ctx)
     assert r.handled and not r.ok
     assert "unknown parent" in r.output.lower()
-    assert "scentinel" in r.output  # suggestion
+    assert "umbrella" in r.output  # suggestion
     hub.upsert_project.assert_not_called()
 
 
@@ -408,17 +408,17 @@ def test_project_new_blank_parent_creates_top_level() -> None:
 def test_project_tree_renders_umbrellas_and_standalones() -> None:
     ctx, hub, _ = _ctx(answers=[])
     hub.list_projects.return_value = [
-        {"id": "scentinel", "name": "SCENTINEL", "parent_id": None},
-        {"id": "scentinel-scrna", "name": "scRNA", "parent_id": "scentinel"},
-        {"id": "scentinel-spatial", "name": "spatial", "parent_id": "scentinel"},
+        {"id": "umbrella", "name": "umbrella programme", "parent_id": None},
+        {"id": "umbrella-scrna", "name": "scRNA", "parent_id": "umbrella"},
+        {"id": "umbrella-spatial", "name": "spatial", "parent_id": "umbrella"},
         {"id": "baird", "name": "BAIRD", "parent_id": None},
     ]
     r = try_dispatch("project tree", ctx)
     assert r.handled and r.ok, r.output
     out = r.output
-    assert "scentinel/" in out  # umbrella marker
-    assert "  scentinel-scrna" in out  # child indent
-    assert "  scentinel-spatial" in out
+    assert "umbrella/" in out  # umbrella marker
+    assert "  umbrella-scrna" in out  # child indent
+    assert "  umbrella-spatial" in out
     # Standalone root has no trailing slash.
     assert "baird  —" in out
 
@@ -436,22 +436,22 @@ def test_project_tree_empty() -> None:
 
 def test_project_siblings_lists_others_under_same_parent() -> None:
     ctx, hub, _ = _ctx(answers=[])
-    ctx.env.project_id = "scentinel-scrna"
+    ctx.env.project_id = "umbrella-scrna"
     hub.get_project.return_value = {
-        "id": "scentinel-scrna",
-        "parent_id": "scentinel",
+        "id": "umbrella-scrna",
+        "parent_id": "umbrella",
     }
     hub.list_children.return_value = [
-        {"id": "scentinel-scrna", "name": "scRNA"},
-        {"id": "scentinel-spatial", "name": "spatial"},
-        {"id": "scentinel-bulkrna", "name": "bulkRNA"},
+        {"id": "umbrella-scrna", "name": "scRNA"},
+        {"id": "umbrella-spatial", "name": "spatial"},
+        {"id": "umbrella-bulkrna", "name": "bulkRNA"},
     ]
     r = try_dispatch("project siblings", ctx)
     assert r.handled and r.ok, r.output
-    assert "scentinel-spatial" in r.output
-    assert "scentinel-bulkrna" in r.output
+    assert "umbrella-spatial" in r.output
+    assert "umbrella-bulkrna" in r.output
     # Self is excluded.
-    assert "scentinel-scrna" not in r.output
+    assert "umbrella-scrna" not in r.output
 
 
 def test_project_siblings_top_level_says_so() -> None:
@@ -476,10 +476,10 @@ def test_unknown_command_returns_none() -> None:
 
 def test_project_rename_inline() -> None:
     ctx, hub, _ = _ctx(answers=[])
-    hub.rename_project.return_value = {"id": "scentinel-spatial", "name": "Spatial"}
-    r = try_dispatch("project rename scentinel-spatial Spatial", ctx)
+    hub.rename_project.return_value = {"id": "umbrella-spatial", "name": "Spatial"}
+    r = try_dispatch("project rename umbrella-spatial Spatial", ctx)
     assert r.handled and r.ok, r.output
-    hub.rename_project.assert_called_once_with("scentinel-spatial", "Spatial")
+    hub.rename_project.assert_called_once_with("umbrella-spatial", "Spatial")
     assert "Spatial" in r.output
 
 

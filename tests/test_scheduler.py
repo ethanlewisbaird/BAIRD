@@ -173,17 +173,17 @@ def test_in_flight_task_does_not_re_fire(client: TestClient) -> None:
 
 def test_expand_project_ids_replaces_parent_with_children(client: TestClient) -> None:
     hub = _Hub(client)
-    client.post("/projects", json={"id": "scentinel", "name": "S"})
+    client.post("/projects", json={"id": "umbrella", "name": "S"})
     client.post(
         "/projects",
-        json={"id": "scentinel-scrna", "name": "scRNA", "parent_id": "scentinel"},
+        json={"id": "umbrella-scrna", "name": "scRNA", "parent_id": "umbrella"},
     )
     client.post(
         "/projects",
-        json={"id": "scentinel-spatial", "name": "spatial", "parent_id": "scentinel"},
+        json={"id": "umbrella-spatial", "name": "spatial", "parent_id": "umbrella"},
     )
-    out = expand_project_ids(hub, ["scentinel"])
-    assert sorted(out) == ["scentinel-scrna", "scentinel-spatial"]
+    out = expand_project_ids(hub, ["umbrella"])
+    assert sorted(out) == ["umbrella-scrna", "umbrella-spatial"]
 
 
 def test_expand_project_ids_leaves_leaf_ids_alone(client: TestClient) -> None:
@@ -235,14 +235,14 @@ def test_multi_project_task_fires_once_per_resolved_id(
     so we don't depend on model/session machinery — the property under
     test is the per-id dispatch, not what each firing does internally."""
     hub = _Hub(client)
-    client.post("/projects", json={"id": "scentinel", "name": "SCENTINEL"})
+    client.post("/projects", json={"id": "umbrella", "name": "umbrella programme"})
     client.post(
         "/projects",
-        json={"id": "scentinel-scrna", "name": "scRNA", "parent_id": "scentinel"},
+        json={"id": "umbrella-scrna", "name": "scRNA", "parent_id": "umbrella"},
     )
     client.post(
         "/projects",
-        json={"id": "scentinel-spatial", "name": "spatial", "parent_id": "scentinel"},
+        json={"id": "umbrella-spatial", "name": "spatial", "parent_id": "umbrella"},
     )
 
     fired_pids: list[str] = []
@@ -259,7 +259,7 @@ def test_multi_project_task_fires_once_per_resolved_id(
         runnable=Runnable(
             prompt="hi",
             model="anthropic/claude-3-haiku",
-            project_ids=["scentinel"],
+            project_ids=["umbrella"],
         ),
         budget=Budget(max_cost_usd=1.0),
     )
@@ -284,7 +284,7 @@ def test_multi_project_task_fires_once_per_resolved_id(
     th.join(timeout=2.0)
 
     # One firing per child; parent itself replaced.
-    assert sorted(fired_pids) == ["scentinel-scrna", "scentinel-spatial"]
+    assert sorted(fired_pids) == ["umbrella-scrna", "umbrella-spatial"]
 
 
 def test_single_project_task_unchanged_when_project_ids_empty(

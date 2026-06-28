@@ -63,7 +63,7 @@ def fake_env():
     exec_ = FakeExecutor()
     env = ToolEnv(
         hub=hub,
-        executors={"hibu": ("http://stub", "tok")},
+        executors={"workstation": ("http://stub", "tok")},
         executor_factory=lambda url, tok: exec_,
     )
     return env, hub, exec_
@@ -74,13 +74,13 @@ def fake_env():
 
 def test_run_on_destructive_command_reclassified() -> None:
     cat = build_catalogue()
-    dec = classify_tool_call(cat["run_on"], {"host": "hibu", "command": "pip install foo"})
+    dec = classify_tool_call(cat["run_on"], {"host": "workstation", "command": "pip install foo"})
     assert dec.tier == Tier.DESTRUCTIVE
 
 
 def test_run_on_safe_command_reclassified() -> None:
     cat = build_catalogue()
-    dec = classify_tool_call(cat["run_on"], {"host": "hibu", "command": "ls /tmp"})
+    dec = classify_tool_call(cat["run_on"], {"host": "workstation", "command": "ls /tmp"})
     assert dec.tier == Tier.SAFE
 
 
@@ -120,7 +120,7 @@ def test_dispatch_blocks_tier_3_by_default(fake_env) -> None:
     cat = build_catalogue()
     r = dispatch(
         cat["install_env"],
-        {"host": "hibu", "project_id": "p", "env_spec": "numpy"},
+        {"host": "workstation", "project_id": "p", "env_spec": "numpy"},
         env,
     )
     assert not r.ok
@@ -130,7 +130,7 @@ def test_dispatch_blocks_tier_3_by_default(fake_env) -> None:
 def test_dispatch_runs_tier_1(fake_env) -> None:
     env, _hub, exec_ = fake_env
     cat = build_catalogue()
-    r = dispatch(cat["read_remote"], {"host": "hibu", "path": "/x"}, env)
+    r = dispatch(cat["read_remote"], {"host": "workstation", "path": "/x"}, env)
     assert r.ok
     assert exec_.calls == [("read_file", {"path": "/x"})]
 
@@ -142,7 +142,7 @@ def test_dispatch_runs_tier_2_with_warning(fake_env) -> None:
     cat = build_catalogue()
     r = dispatch(
         cat["write_remote"],
-        {"host": "hibu", "path": "/tmp/in/x", "content": "x", "project_root": "/tmp"},
+        {"host": "workstation", "path": "/tmp/in/x", "content": "x", "project_root": "/tmp"},
         env,
         gate=gate,
     )
@@ -154,7 +154,7 @@ def test_dispatch_runs_tier_2_with_warning(fake_env) -> None:
 def test_dispatch_routes_through_explicit_host(fake_env) -> None:
     env, _hub, exec_ = fake_env
     cat = build_catalogue()
-    dispatch(cat["run_on"], {"host": "hibu", "command": "ls /"}, env)
+    dispatch(cat["run_on"], {"host": "workstation", "command": "ls /"}, env)
     assert exec_.calls == [("run_command", {"command": "ls /"})]
 
 
@@ -170,11 +170,11 @@ def test_add_location_calls_hub(fake_env) -> None:
     cat = build_catalogue()
     dispatch(
         cat["add_project_location"],
-        {"project_id": "p", "host": "hibu", "path": "/data", "role": "data"},
+        {"project_id": "p", "host": "workstation", "path": "/data", "role": "data"},
         env,
     )
     hub.add_project_location.assert_called_once_with(
-        "p", host="hibu", path="/data", role="data"
+        "p", host="workstation", path="/data", role="data"
     )
 
 
@@ -182,7 +182,7 @@ def test_set_watch_root_round_trip(fake_env) -> None:
     env, _hub, exec_ = fake_env
     cat = build_catalogue()
     # set_watch_root is tier-2; the default gate allows it.
-    r = dispatch(cat["set_watch_root"], {"host": "hibu", "path": "/projects"}, env)
+    r = dispatch(cat["set_watch_root"], {"host": "workstation", "path": "/projects"}, env)
     assert r.ok, r.error
     kinds = [c[0] for c in exec_.calls]
     assert kinds == ["read_file", "write_file", "run_command"]
@@ -196,7 +196,7 @@ def test_where_uses_project_locations(fake_env) -> None:
     env.project_id = "p"
     hub.get_project.return_value = {
         "id": "p",
-        "config": {"data_aliases": [{"name": "raw", "volume": "hibu:/home", "path": "/data/raw"}]},
+        "config": {"data_aliases": [{"name": "raw", "volume": "workstation:/home", "path": "/data/raw"}]},
     }
     hub.list_project_locations.return_value = [
         {"host": "gpu", "path": "/scratch/p", "role": "compute"},
@@ -204,7 +204,7 @@ def test_where_uses_project_locations(fake_env) -> None:
     cat = build_catalogue()
     r = dispatch(cat["where"], {"query": "raw"}, env)
     assert r.ok and len(r.result) == 1
-    assert r.result[0]["host"] == "hibu"
+    assert r.result[0]["host"] == "workstation"
 
 
 # ---- Tool surface visible to the model --------------------------------
@@ -245,36 +245,36 @@ def test_where_expands_to_parent_and_siblings(fake_env) -> None:
     parent and the sibling projects so the agent can find data from any
     assay in the same research programme."""
     env, hub, _exec = fake_env
-    env.project_id = "scentinel-scrna"
+    env.project_id = "umbrella-scrna"
 
     projects = {
-        "scentinel-scrna": {
-            "id": "scentinel-scrna",
-            "parent_id": "scentinel",
+        "umbrella-scrna": {
+            "id": "umbrella-scrna",
+            "parent_id": "umbrella",
             "config": {"data_aliases": []},
         },
-        "scentinel": {
-            "id": "scentinel",
+        "umbrella": {
+            "id": "umbrella",
             "parent_id": None,
             "config": {"data_aliases": [
-                {"name": "manifest", "volume": "hibu:/home", "path": "/data/manifest"},
+                {"name": "manifest", "volume": "workstation:/home", "path": "/data/manifest"},
             ]},
         },
-        "scentinel-spatial": {
-            "id": "scentinel-spatial",
-            "parent_id": "scentinel",
+        "umbrella-spatial": {
+            "id": "umbrella-spatial",
+            "parent_id": "umbrella",
             "config": {"data_aliases": []},
         },
     }
     hub.get_project.side_effect = lambda pid: projects[pid]
     hub.list_children.return_value = [
-        {"id": "scentinel-scrna", "name": "scRNA"},
-        {"id": "scentinel-spatial", "name": "spatial"},
+        {"id": "umbrella-scrna", "name": "scRNA"},
+        {"id": "umbrella-spatial", "name": "spatial"},
     ]
     locations = {
-        "scentinel-scrna": [{"host": "gpu", "path": "/scratch/scrna", "role": "compute"}],
-        "scentinel": [],
-        "scentinel-spatial": [{"host": "hibu", "path": "/data/spatial_counts", "role": "data"}],
+        "umbrella-scrna": [{"host": "gpu", "path": "/scratch/scrna", "role": "compute"}],
+        "umbrella": [],
+        "umbrella-spatial": [{"host": "workstation", "path": "/data/spatial_counts", "role": "data"}],
     }
     hub.list_project_locations.side_effect = lambda pid: locations[pid]
 
@@ -283,12 +283,12 @@ def test_where_expands_to_parent_and_siblings(fake_env) -> None:
     r = dispatch(cat["where"], {"query": "spatial"}, env)
     assert r.ok, r.error
     by_pid = {h["project_id"] for h in r.result}
-    assert "scentinel-spatial" in by_pid
+    assert "umbrella-spatial" in by_pid
 
     # Parent's alias.
     r2 = dispatch(cat["where"], {"query": "manifest"}, env)
     assert r2.ok
-    assert any(h["project_id"] == "scentinel" for h in r2.result)
+    assert any(h["project_id"] == "umbrella" for h in r2.result)
 
 
 def test_where_top_level_project_doesnt_expand(fake_env) -> None:
@@ -303,7 +303,7 @@ def test_where_top_level_project_doesnt_expand(fake_env) -> None:
     }
     hub.list_children.return_value = []
     hub.list_project_locations.return_value = [
-        {"host": "hibu", "path": "/data/x", "role": "data"},
+        {"host": "workstation", "path": "/data/x", "role": "data"},
     ]
     cat = build_catalogue()
     r = dispatch(cat["where"], {"query": "data"}, env)
@@ -314,40 +314,40 @@ def test_where_top_level_project_doesnt_expand(fake_env) -> None:
 
 def test_where_umbrella_expands_to_children(fake_env) -> None:
     env, hub, _exec = fake_env
-    env.project_id = "scentinel"
+    env.project_id = "umbrella"
     hub.get_project.side_effect = lambda pid: {
-        "scentinel": {"id": "scentinel", "parent_id": None, "config": {}},
-        "scentinel-scrna": {"id": "scentinel-scrna", "parent_id": "scentinel", "config": {}},
+        "umbrella": {"id": "umbrella", "parent_id": None, "config": {}},
+        "umbrella-scrna": {"id": "umbrella-scrna", "parent_id": "umbrella", "config": {}},
     }[pid]
     hub.list_children.return_value = [
-        {"id": "scentinel-scrna", "name": "scRNA"},
+        {"id": "umbrella-scrna", "name": "scRNA"},
     ]
     hub.list_project_locations.side_effect = lambda pid: {
-        "scentinel": [],
-        "scentinel-scrna": [{"host": "gpu", "path": "/scratch/scrna", "role": "compute"}],
+        "umbrella": [],
+        "umbrella-scrna": [{"host": "gpu", "path": "/scratch/scrna", "role": "compute"}],
     }[pid]
     cat = build_catalogue()
     r = dispatch(cat["where"], {"query": "scratch"}, env)
     assert r.ok
-    assert any(h["project_id"] == "scentinel-scrna" for h in r.result)
+    assert any(h["project_id"] == "umbrella-scrna" for h in r.result)
 
 
 def test_list_siblings_tool(fake_env) -> None:
     env, hub, _exec = fake_env
-    env.project_id = "scentinel-scrna"
+    env.project_id = "umbrella-scrna"
     hub.get_project.return_value = {
-        "id": "scentinel-scrna", "parent_id": "scentinel",
+        "id": "umbrella-scrna", "parent_id": "umbrella",
     }
     hub.list_children.return_value = [
-        {"id": "scentinel-scrna", "name": "scRNA"},
-        {"id": "scentinel-spatial", "name": "spatial"},
-        {"id": "scentinel-bulkrna", "name": "bulkRNA"},
+        {"id": "umbrella-scrna", "name": "scRNA"},
+        {"id": "umbrella-spatial", "name": "spatial"},
+        {"id": "umbrella-bulkrna", "name": "bulkRNA"},
     ]
     cat = build_catalogue()
     r = dispatch(cat["list_siblings"], {}, env)
     assert r.ok, r.error
     ids = sorted(s["id"] for s in r.result)
-    assert ids == ["scentinel-bulkrna", "scentinel-spatial"]
+    assert ids == ["umbrella-bulkrna", "umbrella-spatial"]
 
 
 def test_list_siblings_empty_for_top_level(fake_env) -> None:
