@@ -745,26 +745,85 @@ def hub_uninstall(
 
 
 @app.command("up")
-def up() -> None:
-    """Make sure the hub is running in the background."""
-    from .supervisor import ensure_hub_running, is_hub_running
+def up(
+    hub_only: bool = typer.Option(
+        False, "--hub-only", help="Start only the hub; skip the local daemon."
+    ),
+) -> None:
+    """Start the hub (and the local daemon) in the background if not already up."""
+    from .supervisor import (
+        ensure_daemon_running,
+        ensure_hub_running,
+        is_daemon_running,
+        is_hub_running,
+    )
 
     if is_hub_running():
         console.print("[green]hub is already running[/green]")
+    else:
+        ensure_hub_running(quiet=True)
+        console.print("[green]hub started[/green]")
+    if hub_only:
         return
-    ensure_hub_running(quiet=True)
-    console.print("[green]hub started[/green]")
+    if is_daemon_running():
+        console.print("[green]daemon is already running[/green]")
+    else:
+        ensure_daemon_running(quiet=True)
+        console.print("[green]daemon started[/green]")
 
 
 @app.command("stop")
-def stop() -> None:
-    """Stop the background hub started by `baird up` (or any auto-start)."""
-    from .supervisor import stop_hub
+def stop(
+    hub_only: bool = typer.Option(
+        False, "--hub-only", help="Stop only the hub; leave the daemon running."
+    ),
+) -> None:
+    """Stop the background hub and daemon started by `baird up`."""
+    from .supervisor import stop_daemon, stop_hub
 
+    stopped: list[str] = []
+    if not hub_only and stop_daemon():
+        stopped.append("daemon")
     if stop_hub():
-        console.print("[green]hub stopped[/green]")
+        stopped.append("hub")
+    if stopped:
+        console.print(f"[green]stopped: {', '.join(stopped)}[/green]")
     else:
-        console.print("[yellow]no supervised hub to stop[/yellow]")
+        console.print("[yellow]nothing supervised to stop[/yellow]")
+
+
+@app.command("restart")
+def restart(
+    hub_only: bool = typer.Option(
+        False, "--hub-only", help="Restart only the hub; leave the daemon untouched."
+    ),
+) -> None:
+    """Stop and re-start the hub (and the local daemon). One command, picks up
+    any code changes the running processes were still holding."""
+    import time as _time
+
+    from .supervisor import (
+        ensure_daemon_running,
+        ensure_hub_running,
+        is_hub_running,
+        stop_daemon,
+        stop_hub,
+    )
+
+    if not hub_only:
+        stop_daemon()
+    stop_hub()
+    # Brief settle so the new hub doesn't race the old one on the port.
+    for _ in range(20):
+        if not is_hub_running():
+            break
+        _time.sleep(0.1)
+    ensure_hub_running(quiet=True)
+    msg = ["hub"]
+    if not hub_only:
+        ensure_daemon_running(quiet=True)
+        msg.append("daemon")
+    console.print(f"[green]restarted: {', '.join(msg)}[/green]")
 
 
 # ----- diff -----

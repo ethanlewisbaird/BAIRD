@@ -21,7 +21,51 @@ def test_stop_hub_returns_false_with_no_pid_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("BAIRD_HOME", str(tmp_path))
+    # Disable the pkill fallback so a live hub on the dev machine doesn't get
+    # SIGTERM'd by the test (and the assertion stays meaningful).
+    monkeypatch.setattr(supervisor, "_pkill_pattern", lambda _p: False)
     assert supervisor.stop_hub() is False
+
+
+def test_is_daemon_running_false_when_no_daemon(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("BAIRD_HOME", str(tmp_path))
+    assert supervisor.is_daemon_running() is False
+
+
+def test_stop_daemon_returns_false_with_no_pid_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("BAIRD_HOME", str(tmp_path))
+    monkeypatch.setattr(supervisor, "_pkill_pattern", lambda _p: False)
+    assert supervisor.stop_daemon() is False
+
+
+def test_pkill_pattern_fallback_kills_unsupervised_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When no PID file exists, stop_hub should fall back to a pattern-based
+    pkill so manually-launched hubs can still be reaped."""
+    monkeypatch.setenv("BAIRD_HOME", str(tmp_path))
+    called: list[str] = []
+    monkeypatch.setattr(
+        supervisor,
+        "_pkill_pattern",
+        lambda pattern: called.append(pattern) or True,
+    )
+    assert supervisor.stop_hub() is True
+    assert any("hub serve" in p for p in called)
+
+
+def test_is_daemon_running_handles_stale_pid_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pid file pointing at a dead process should report not-running, not
+    raise. Use a very large PID that's almost certainly free."""
+    monkeypatch.setenv("BAIRD_HOME", str(tmp_path))
+    (tmp_path / "daemon.pid").write_text("2147483646")
+    assert supervisor.is_daemon_running() is False
 
 
 def test_ensure_then_stop_round_trip(
