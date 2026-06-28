@@ -160,3 +160,46 @@ def test_parent_id_via_config_dict_also_accepted(client: TestClient) -> None:
     )
     assert r.status_code == 200, r.text
     assert r.json()["parent_id"] == "u"
+
+
+# ---- DELETE /projects/{id} (issue #4) -----------------------------------
+
+
+def test_delete_leaf_project_succeeds(client: TestClient) -> None:
+    client.post("/projects", json={"id": "leaf", "name": "Leaf"})
+    r = client.delete("/projects/leaf")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"deleted": "leaf"}
+    # No longer listed.
+    assert all(p["id"] != "leaf" for p in client.get("/projects").json())
+    assert client.get("/projects/leaf").status_code == 404
+
+
+def test_delete_project_with_children_rejected(client: TestClient) -> None:
+    client.post("/projects", json={"id": "umbrella", "name": "U"})
+    client.post(
+        "/projects",
+        json={"id": "child-a", "name": "A", "parent_id": "umbrella"},
+    )
+    client.post(
+        "/projects",
+        json={"id": "child-b", "name": "B", "parent_id": "umbrella"},
+    )
+    r = client.delete("/projects/umbrella")
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "child-a" in detail and "child-b" in detail
+    # Parent still exists.
+    assert client.get("/projects/umbrella").status_code == 200
+
+
+def test_delete_unknown_project_404(client: TestClient) -> None:
+    assert client.delete("/projects/nope").status_code == 404
+
+
+def test_delete_then_recreate_works(client: TestClient) -> None:
+    client.post("/projects", json={"id": "ghost", "name": "G"})
+    assert client.delete("/projects/ghost").status_code == 200
+    r = client.post("/projects", json={"id": "ghost", "name": "G2"})
+    assert r.status_code == 200
+    assert r.json()["name"] == "G2"

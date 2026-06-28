@@ -389,6 +389,27 @@ def register_routes(app: FastAPI) -> None:
             raise HTTPException(404, "project not found")
         return _project_out(row)
 
+    @app.delete("/projects/{project_id}")
+    def delete_project(project_id: str, s: Session = Depends(get_memory)) -> dict:
+        """Hard delete. Decisions / sessions / messages that reference this
+        project_id are left in place — they're historical record and the FK
+        is plain string (no DB cascade). Parent-with-children is rejected;
+        the caller must reparent or delete children first."""
+        row = s.get(Project, project_id)
+        if row is None:
+            raise HTTPException(404, "project not found")
+        kids = _children_of(s, project_id)
+        if kids:
+            child_ids = sorted(k.id for k in kids)
+            raise HTTPException(
+                400,
+                f"cannot delete {project_id!r}: has {len(kids)} child project(s) "
+                f"({', '.join(child_ids)}). Reparent or delete them first.",
+            )
+        s.delete(row)
+        s.commit()
+        return {"deleted": project_id}
+
     # ---- Project locations ----
     # Locations are stored inside `Project.config["locations"]` (JSON). We also
     # auto-migrate any legacy `checkout_hosts: [{host_id,path,branch}, ...]` on

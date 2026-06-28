@@ -882,12 +882,60 @@ def cmd_project_rename(parts: list[str], ctx: SlashContext) -> SlashResult:
     )
 
 
+# ---- /project delete -------------------------------------------------
+
+
+def cmd_project_delete(parts: list[str], ctx: SlashContext) -> SlashResult:
+    """Delete a project. Tier 3 (destructive) — always prompts y/N showing
+    id, name, and any child count before going through. Hub rejects if
+    children exist; we still show the child count up-front so the user
+    isn't surprised by the server-side error."""
+    known: dict[str, str] = {}
+    if parts:
+        known["id"] = parts[0]
+    fields = [FormField("id", "project id to delete", required=True)]
+    vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
+    pid = vals["id"]
+    try:
+        proj = ctx.hub.get_project(pid)
+    except Exception as e:
+        return SlashResult(handled=True, ok=False, output=f"project not found: {e}")
+    try:
+        kids = ctx.hub.list_children(pid)
+    except Exception:
+        kids = []
+    name = proj.get("name") or pid
+    if kids:
+        kid_ids = ", ".join(sorted(k["id"] for k in kids))
+        return SlashResult(
+            handled=True,
+            ok=False,
+            output=(
+                f"refusing to delete {pid!r} ({name}): has {len(kids)} child "
+                f"project(s) ({kid_ids}). Reparent or delete them first."
+            ),
+        )
+    prompt = f"delete project {pid!r} ({name})? [y/N] "
+    answer = (ctx.input_fn(prompt) or "").strip().lower()
+    if answer not in ("y", "yes"):
+        return SlashResult(handled=True, output="aborted")
+    try:
+        ctx.hub.delete_project(pid)
+    except Exception as e:
+        return SlashResult(handled=True, ok=False, output=f"failed to delete: {e}")
+    # If the deleted project happens to be the REPL's current active one,
+    # the header will be stale until the user `/project new ...`s or
+    # restarts. Worth a follow-up but not load-bearing for the bug fix.
+    return SlashResult(handled=True, output=f"deleted project {pid}")
+
+
 # ---- Registry --------------------------------------------------------
 
 
 _COMMANDS: dict[str, HandlerFn] = {
     "project new": cmd_project_new,
     "project rename": cmd_project_rename,
+    "project delete": cmd_project_delete,
     "project locations": cmd_project_locations,
     "project add-location": cmd_project_add_location,
     "project enrich": cmd_project_enrich,

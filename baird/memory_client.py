@@ -163,6 +163,15 @@ class HubClient:
         rename case (issue #3)."""
         return self.patch_project(project_id, name=new_name)
 
+    def delete_project(self, project_id: str) -> dict:
+        """Hard delete. Server rejects with 400 if the project has
+        children — caller must reparent or delete them first. Decisions,
+        sessions, actions referencing the project are left in place
+        (historical record; the FK is plain string, no DB cascade)."""
+        r = self._client.delete(f"/projects/{project_id}")
+        r.raise_for_status()
+        return r.json()
+
     # ---- Project locations ----
 
     def list_project_locations(self, project_id: str) -> list[dict]:

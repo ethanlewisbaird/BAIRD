@@ -511,6 +511,61 @@ def test_project_rename_propagates_hub_error() -> None:
     assert "failed to rename" in r.output
 
 
+# ---- /project delete (issue #4) -----------------------------------------
+
+
+def test_project_delete_confirmed() -> None:
+    ctx, hub, _ = _ctx(answers=["y"])  # y to the y/N prompt
+    hub.get_project.return_value = {"id": "leaf", "name": "Leaf"}
+    hub.list_children.return_value = []
+    hub.delete_project.return_value = {"deleted": "leaf"}
+    r = try_dispatch("project delete leaf", ctx)
+    assert r.handled and r.ok, r.output
+    hub.delete_project.assert_called_once_with("leaf")
+    assert "deleted project leaf" in r.output
+
+
+def test_project_delete_aborted_on_no() -> None:
+    ctx, hub, _ = _ctx(answers=["n"])
+    hub.get_project.return_value = {"id": "leaf", "name": "Leaf"}
+    hub.list_children.return_value = []
+    r = try_dispatch("project delete leaf", ctx)
+    assert r.handled and r.ok
+    hub.delete_project.assert_not_called()
+    assert "aborted" in r.output
+
+
+def test_project_delete_blocked_when_children_exist() -> None:
+    """Client refuses up-front when children are present so the user sees a
+    clear message before the hub round-trip."""
+    ctx, hub, _ = _ctx(answers=[])  # no prompt should fire
+    hub.get_project.return_value = {"id": "umbrella", "name": "Umbrella"}
+    hub.list_children.return_value = [{"id": "child-a"}, {"id": "child-b"}]
+    r = try_dispatch("project delete umbrella", ctx)
+    assert r.handled and not r.ok
+    hub.delete_project.assert_not_called()
+    assert "child-a" in r.output and "child-b" in r.output
+
+
+def test_project_delete_unknown_project() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.get_project.side_effect = RuntimeError("404")
+    r = try_dispatch("project delete missing", ctx)
+    assert r.handled and not r.ok
+    hub.delete_project.assert_not_called()
+    assert "project not found" in r.output
+
+
+def test_project_delete_propagates_hub_error_on_delete() -> None:
+    ctx, hub, _ = _ctx(answers=["y"])
+    hub.get_project.return_value = {"id": "leaf", "name": "Leaf"}
+    hub.list_children.return_value = []
+    hub.delete_project.side_effect = RuntimeError("500 boom")
+    r = try_dispatch("project delete leaf", ctx)
+    assert r.handled and not r.ok
+    assert "failed to delete" in r.output
+
+
 # ---- Issue #2 guard: flag-looking values are rejected -------------------
 
 
