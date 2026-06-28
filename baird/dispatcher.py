@@ -1,10 +1,10 @@
 """Where a task runs.
 
-A scheduled `Runnable` with `kind="command"` and `host_id="hibu"` should run
-the shell command on hibu, not on the hub. This module maps the host_id to a
-concrete ExecutorClient (using the hub-side satellites.json registry the
-satellite-enroll command writes), or falls back to local subprocess for the
-hub itself.
+A scheduled `Runnable` with `kind="command"` and a non-null `host_id` should
+run the shell command on that satellite, not on the hub. This module maps the
+host_id to a concrete ExecutorClient (using the hub-side satellites.json
+registry the satellite-enroll command writes), or falls back to local
+subprocess for the hub itself.
 
 The dispatcher records ONE Action regardless of where execution happens, so
 the unified ledger stays unified.

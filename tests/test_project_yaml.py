@@ -24,14 +24,14 @@ def test_template_has_default_rules() -> None:
 
 
 def test_round_trip(tmp_path: Path) -> None:
-    py = project_yaml_template("scrna-2026", "scRNA pipeline")
+    py = project_yaml_template("my-project", "My project pipeline")
     py.goals.append(Goal(id="g1", text="integrate 3 datasets"))
     py.state = {"phase": "qc"}
     path = tmp_path / ".baird" / "project.yaml"
     save_project_yaml(py, path)
 
     loaded = load_project_yaml(path)
-    assert loaded.id == "scrna-2026"
+    assert loaded.id == "my-project"
     assert loaded.goals[0].text == "integrate 3 datasets"
     assert loaded.state == {"phase": "qc"}
     assert {r.id for r in loaded.rules} == {r.id for r in py.rules}

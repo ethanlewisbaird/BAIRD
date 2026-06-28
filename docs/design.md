@@ -1,12 +1,9 @@
 # Design
 
-The full design — every sub-decision across 5 phases, with rationale — lives in project memory:
-
-```
-~/.claude/projects/-home-ethan/memory/project_ai_harness.md
-```
-
-This document captures what's *shipped* against that design and what's deliberately left for later.
+This document captures what's *shipped* across BAIRD's five build phases and
+what's deliberately left for later. The full design rationale — every
+sub-decision — lives in the project's own memory store; this file is the
+public-facing summary.
 
 ## Shipped
 

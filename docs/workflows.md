@@ -70,9 +70,9 @@ trigger:
   cron: "0 9 * * *"
 
 runnable:
-  prompt: "Give me a 3-sentence summary of what changed in the scrna-2026 repo in the last 24h, and flag anything that looks off."
+  prompt: "Give me a 3-sentence summary of what changed in the my-project repo in the last 24h, and flag anything that looks off."
   model: anthropic/claude-3-haiku
-  project_id: scrna-2026
+  project_id: my-project
 
 budget:
   max_runtime_s: 60
@@ -102,11 +102,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=ethan
+User=user
 Environment=OPENROUTER_API_KEY=sk-or-...
 Environment=TELEGRAM_BOT_TOKEN=...
 Environment=TELEGRAM_CHAT_ID=...
-ExecStart=/home/ethan/BAIRD/.venv/bin/baird orchestrator serve
+ExecStart=/home/user/BAIRD/.venv/bin/baird orchestrator serve
 Restart=on-failure
 
 [Install]
@@ -120,7 +120,7 @@ Same shape for `baird hub serve` and `baird daemon`.
 ```yaml
 trigger:
   type: watch
-  path: /home/ethan/projects/scrna-2026/results
+  path: /home/user/projects/my-project/results
   events: [created, modified]
 ```
 
@@ -148,7 +148,7 @@ default_bus.publish("pipeline.done", {"workflow": "qc.smk"})
 ## Running a Snakemake/Nextflow pipeline with provenance
 
 ```bash
-cd ~/projects/scrna-2026
+cd ~/projects/my-project
 
 baird snakemake Snakefile --cores 8 --use-conda
 baird nextflow main.nf -profile slurm
@@ -170,7 +170,7 @@ baird snakemake Snakefile -- --cores 8 --use-conda --rerun-incomplete
 
 ```bash
 export TAVILY_API_KEY=tvly-...
-baird research "rapid scRNA-seq batch integration benchmarks 2026" --project scrna-2026
+baird research "rapid scRNA-seq batch integration benchmarks 2026" --project my-project
 ```
 
 The result lands as an inbox `result` row with the markdown brief — read it with `baird inbox` or `baird logs <action_id>`.
@@ -242,7 +242,7 @@ curl localhost:8000/files/<file_id>/lineage | jq
 
 ```bash
 # Search across action summaries, decisions, and inbox bodies:
-curl 'localhost:8000/recall?query=harmony&project_id=scrna-2026&k=10' | jq
+curl 'localhost:8000/recall?query=harmony&project_id=my-project&k=10' | jq
 ```
 
 Backed by SQL `LIKE` for now. The `/recall` shape is locked, so once the LanceDB swap lands you keep the same calls.
@@ -259,7 +259,7 @@ Prereqs on the hub:
 Then, from the hub:
 
 ```bash
-baird satellite enroll <ssh-host>            # e.g. `baird satellite enroll hibu`
+baird satellite enroll <ssh-host>            # e.g. `baird satellite enroll workstation`
 ```
 
 What it does, in order:
