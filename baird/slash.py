@@ -58,6 +58,11 @@ class SlashResult:
     # Signal to the REPL: switch the active project to this id (re-loads
     # context, session, etc.). Set by /project new so create+switch is one step.
     switch_to_project: str | None = None
+    # When set, the REPL treats this string as the user's next message and
+    # runs a model turn against it (instead of waiting for further input).
+    # Used by commands like /audit-satellite that prime the AI with a
+    # structured prompt the model is meant to act on.
+    next_user_prompt: str | None = None
 
 
 HandlerFn = Callable[[list[str], SlashContext], SlashResult]
@@ -700,6 +705,100 @@ def cmd_run_on(parts: list[str], ctx: SlashContext) -> SlashResult:
     return res
 
 
+# ---- /audit-satellite -----------------------------------------------
+
+
+_AUDIT_PROMPT_TEMPLATE = (
+    "Audit the satellite **{host}** under `{path}` for projects we should register "
+    "with BAIRD, and propose any natural parent/child family trees.\n\n"
+    "Use your existing tools (`run_on`, `read_remote`, `list_project_locations`) "
+    "to enumerate the directory layout — start with something like "
+    "`run_on host={host} command=\"find {path} -maxdepth {depth} -type d -not -path '*/.*' -not -path '*/node_modules*' | head -200\"`. "
+    "For each candidate directory, peek at light signals (presence of `.git`, "
+    "`README.md`, `environment.yml`, `pyproject.toml`, `Snakefile`, `nextflow.config`, "
+    "data subdirs) before deciding.\n\n"
+    "Skip dirs already registered as a project location (check via "
+    "`list_project_locations` or the project list).\n\n"
+    "When you're done, give me a structured report with TWO sections:\n\n"
+    "**1. Suggested projects** — flat list. For each:\n"
+    "  - proposed `id` (kebab-case slug) and human-readable `name`\n"
+    "  - the location to register: `host={host}`, `path=<absolute path>`, `role` "
+    "(`code` / `data` / `compute` / `mixed`)\n"
+    "  - one-sentence justification (what's there)\n\n"
+    "**2. Suggested family trees** — parent/child groupings. Only suggest a parent "
+    "when the directory layout genuinely implies a shared umbrella (e.g. a "
+    "top-level dir whose children are clearly co-related assays / sub-pipelines / "
+    "sub-experiments, with shared README or naming pattern). For each tree:\n"
+    "  - proposed umbrella `id` + `name` + one-sentence rationale\n"
+    "  - the children (referencing ids from section 1)\n\n"
+    "Be conservative — if you're not confident two sibling dirs are part of one "
+    "umbrella, list them as separate flat projects. Don't invent umbrellas just "
+    "to group things.\n\n"
+    "Do NOT register anything yet — this is a proposal pass. I'll review and tell "
+    "you which to create."
+)
+
+
+def cmd_audit_satellite(parts: list[str], ctx: SlashContext) -> SlashResult:
+    """Prime the model to audit a satellite directory for registrable projects.
+
+    Usage:
+      /audit-satellite <host> <path> [--depth N]
+      /audit-satellite host=<host> path=<path> [depth=N]
+
+    The slash command itself does NO scanning — it builds a structured prompt
+    and returns it via `next_user_prompt`, so the REPL feeds it to the model
+    as the next user turn. The model then uses its existing tool catalogue
+    (`run_on`, `read_remote`, `list_project_locations`) to enumerate the
+    directory tree and produce a two-section proposal: flat projects + any
+    parent/child family trees the layout implies.
+
+    No registrations happen automatically; the model returns a proposal the
+    user reviews before issuing `/project new`.
+    """
+    pos, kv, err = parse_inline_args(parts)
+    if err:
+        return SlashResult(handled=True, ok=False, output=err)
+    known = dict(kv)
+    if pos:
+        if len(pos) >= 1:
+            known.setdefault("host", pos[0])
+        if len(pos) >= 2:
+            known.setdefault("path", pos[1])
+    # Carry the active host if no host given.
+    if "host" not in known and ctx.active_host:
+        known["host"] = ctx.active_host
+    guard = _reject_flaglike_values({k: v for k, v in known.items() if k != "depth"})
+    if guard:
+        return SlashResult(handled=True, ok=False, output=guard)
+
+    fields = [
+        FormField("host", "satellite host_id", required=True),
+        FormField("path", "absolute path on the satellite to audit", required=True),
+    ]
+    vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
+    path_err = _absolute_path(vals["path"])
+    if path_err is not None:
+        return SlashResult(
+            handled=True, ok=False,
+            output=f"path {path_err}, got: {vals['path']!r}",
+        )
+    try:
+        depth = int(known.get("depth", "3"))
+    except ValueError:
+        return SlashResult(handled=True, ok=False, output="depth must be an integer")
+    if not 1 <= depth <= 6:
+        return SlashResult(handled=True, ok=False, output="depth must be 1..6")
+
+    prompt = _AUDIT_PROMPT_TEMPLATE.format(host=vals["host"], path=vals["path"], depth=depth)
+    return SlashResult(
+        handled=True,
+        output=f"auditing {vals['host']}:{vals['path']} (depth={depth}) — handing off to the model…",
+        next_user_prompt=prompt,
+        active_host=vals["host"],
+    )
+
+
 # ---- tool runner -----------------------------------------------------
 
 
@@ -946,6 +1045,7 @@ _COMMANDS: dict[str, HandlerFn] = {
     "env install": cmd_env_install,
     "where": cmd_where,
     "run": cmd_run_on,
+    "audit-satellite": cmd_audit_satellite,
 }
 
 

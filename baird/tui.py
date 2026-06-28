@@ -272,7 +272,12 @@ def run_tui_repl(
                         if swapped[0] is not None:
                             rendered, system, repo_ctx, session = swapped
                             console.print(_render_header(repo_ctx, host_id, session, config))
-                    continue
+                    if slash_res.next_user_prompt:
+                        # Fall through to the model-turn path with the primed
+                        # prompt as the next user message.
+                        line = slash_res.next_user_prompt
+                    else:
+                        continue
 
                 cmd = line[1:].split()[0].lower()
                 if cmd in {"exit", "quit"}:

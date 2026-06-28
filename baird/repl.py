@@ -191,7 +191,12 @@ def run_repl(
                     )
                     if swapped[0] is not None:
                         rendered, system, repo_ctx, session = swapped
-                continue
+                if slash_res.next_user_prompt:
+                    # Fall through to the model-turn path with the primed
+                    # prompt as the next user message (e.g. /audit-satellite).
+                    line = slash_res.next_user_prompt
+                else:
+                    continue
 
             cmd = line[1:].split()[0].lower()
             if cmd in {"exit", "quit"}:
