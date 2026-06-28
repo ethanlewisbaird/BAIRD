@@ -134,6 +134,9 @@ class Completion:
     usage: Usage = field(default_factory=Usage)
     cost_usd: float = 0.0
     raw: dict[str, Any] = field(default_factory=dict)
+    # OpenAI-style tool calls returned by the model, if any. Each entry has
+    # `id` (str), `name` (str), and `arguments` (dict parsed from JSON).
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 Transport = Callable[[dict[str, Any]], dict[str, Any]]
@@ -175,6 +178,8 @@ class OpenRouterClient:
         max_tokens: int = 1024,
         temperature: float = 0.2,
         system: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | None = None,
     ) -> Completion:
         body: dict[str, Any] = {
             "model": model,
@@ -182,6 +187,9 @@ class OpenRouterClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = tool_choice or "auto"
         raw = self._post("/chat/completions", body)
         return self._parse(model, raw)
 
@@ -318,7 +326,8 @@ class OpenRouterClient:
 
     def _parse(self, model: str, raw: dict[str, Any]) -> Completion:
         try:
-            content = raw["choices"][0]["message"]["content"] or ""
+            msg = raw["choices"][0]["message"]
+            content = msg.get("content") or ""
         except (KeyError, IndexError) as e:
             raise ModelError(f"unexpected response shape: {raw}") from e
         usage_raw = raw.get("usage") or {}
@@ -331,7 +340,34 @@ class OpenRouterClient:
         if cost == 0.0:
             cost = self._estimate_cost(model, usage)
 
-        return Completion(model=model, content=content, usage=usage, cost_usd=cost, raw=raw)
+        # OpenAI-style tool_calls (passed through OpenRouter for models that
+        # support function calling). Each entry: {id, type, function: {name,
+        # arguments(JSON string)}}. We flatten + parse arguments here so the
+        # REPL doesn't have to know the wire shape.
+        tool_calls: list[dict[str, Any]] = []
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            raw_args = fn.get("arguments")
+            args: dict[str, Any]
+            if isinstance(raw_args, str):
+                try:
+                    args = _json.loads(raw_args) if raw_args.strip() else {}
+                except _json.JSONDecodeError:
+                    args = {"_raw": raw_args}
+            elif isinstance(raw_args, dict):
+                args = raw_args
+            else:
+                args = {}
+            tool_calls.append({
+                "id": tc.get("id") or "",
+                "name": fn.get("name") or "",
+                "arguments": args,
+            })
+
+        return Completion(
+            model=model, content=content, usage=usage, cost_usd=cost,
+            raw=raw, tool_calls=tool_calls,
+        )
 
     def _estimate_cost(self, model: str, usage: Usage) -> float:
         rates = self._pricing.get(model)

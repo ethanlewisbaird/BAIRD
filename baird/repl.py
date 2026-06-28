@@ -20,6 +20,7 @@ Special inputs start with `/`:
 
 from __future__ import annotations
 
+import json as _json
 import re
 import sys
 import uuid
@@ -361,6 +362,10 @@ def run_repl(
                 console.print(f"[red]unknown command:[/red] /{cmd} (try /help)")
                 continue
 
+        def _on_tool_event(event: str, detail: str) -> None:
+            color = {"call": "cyan", "result": "dim", "blocked": "yellow"}.get(event, "dim")
+            console.print(f"[{color}][{event}][/{color}] {detail}")
+
         try:
             completion = _one_turn(
                 user_msg=line,
@@ -370,6 +375,7 @@ def run_repl(
                 config=config,
                 system=system,
                 host_id=host_id,
+                on_tool_event=_on_tool_event,
             )
         except ModelError as e:
             console.print(f"[red]model error:[/red] {e}")
@@ -400,6 +406,9 @@ def run_repl(
     return stats
 
 
+MAX_AGENT_ROUNDS = 6
+
+
 def _one_turn(
     *,
     user_msg: str,
@@ -410,13 +419,54 @@ def _one_turn(
     system: str,
     host_id: str | None,
     on_chunk: Callable[[str], None] | None = None,
+    on_tool_event: Callable[[str, str], None] | None = None,
 ) -> Completion:
-    """Append the user message, call the model with recent history, record an
-    Action with cost, append the assistant message. Returns the Completion.
+    """Run one user-driven turn — including any agent loop the model triggers.
 
-    When `on_chunk` is set, calls `stream_complete` and reports partial
-    content via the callback as it arrives.
+    The loop:
+      1. Send user message + recent history (with the OpenAI-style `tools`
+         schema derived from the hub tool catalogue).
+      2. If the response has `tool_calls`, dispatch each via
+         `agent_tools.dispatch`, append the assistant + tool result messages
+         to the local history, and call the model again.
+      3. Repeat until the model returns plain content (no tool calls) or we
+         hit `MAX_AGENT_ROUNDS` (currently 6).
+
+    Tier-3 (destructive) tool calls are blocked by default — they need
+    explicit user approval via a slash command, not silent agent execution.
+    The blocking is reported back to the model as a `tool` message so it can
+    adapt rather than silently failing.
+
+    Cost / tokens are accumulated across rounds and recorded on a single
+    Action row. Only the final assistant message (no tool calls) is persisted
+    to the session — intermediate rounds stay in-process so DB history
+    remains "user → final assistant" per turn.
+
+    `on_chunk` is honored only on the FINAL round (when no more tool calls
+    are expected) — intermediate rounds use non-streaming requests because
+    OpenRouter returns tool_calls at end-of-stream anyway.
+
+    `on_tool_event(event, detail)` is called for visibility: `event` is one
+    of `call` / `result` / `blocked`.
     """
+    from .agent_tools import (
+        ApprovalGate,
+        ToolEnv,
+        build_catalogue,
+        classify_tool_call,
+        dispatch,
+        tools_openai_schema,
+    )
+    from .context_compressor import load_history_with_summary
+
+    catalogue = build_catalogue()
+    tools_schema = tools_openai_schema(catalogue)
+    env = ToolEnv(hub=hub, project_id=config.project_id)
+    # Auto-run tier-1 + tier-2 calls; tier-3 (destructive) is rejected back to
+    # the model so it can adapt. The user opts into destructive ops via the
+    # corresponding slash commands.
+    gate = ApprovalGate()
+
     with hub.start_action(
         project_id=config.project_id,
         tool_name="model",
@@ -424,8 +474,6 @@ def _one_turn(
         host=host_id,
         model_name=config.model,
     ) as action:
-        from .context_compressor import load_history_with_summary
-
         msgs = load_history_with_summary(
             hub,
             session_id=session_id,
@@ -436,35 +484,163 @@ def _one_turn(
         hub.append_message(session_id, role="user", content=user_msg)
         msgs.append({"role": "user", "content": user_msg})
 
-        if on_chunk is not None:
-            completion = model_client.stream_complete(
-                model=config.model,
-                messages=msgs,
-                max_tokens=config.max_tokens,
-                temperature=config.temperature,
-                system=system,
-                on_chunk=on_chunk,
-            )
-        else:
-            completion = model_client.complete(
-                model=config.model,
-                messages=msgs,
-                max_tokens=config.max_tokens,
-                temperature=config.temperature,
-                system=system,
-            )
+        total_cost = 0.0
+        total_input = 0
+        total_output = 0
+        completion: Completion | None = None
 
+        for round_idx in range(MAX_AGENT_ROUNDS):
+            # Stream only on what we *think* is the final round; if it turns
+            # out to have tool_calls, that's fine — partial content was just
+            # the model's preamble.
+            use_stream = on_chunk is not None and round_idx > 0
+            if use_stream:
+                completion = model_client.stream_complete(
+                    model=config.model, messages=msgs,
+                    max_tokens=config.max_tokens, temperature=config.temperature,
+                    system=system, on_chunk=on_chunk,
+                )
+            else:
+                completion = model_client.complete(
+                    model=config.model, messages=msgs,
+                    max_tokens=config.max_tokens, temperature=config.temperature,
+                    system=system, tools=tools_schema,
+                )
+            total_cost += completion.cost_usd
+            total_input += completion.usage.input_tokens
+            total_output += completion.usage.output_tokens
+
+            if not completion.tool_calls:
+                # Final turn — stream the content for the caller if requested
+                # and we haven't already.
+                if on_chunk is not None and not use_stream and completion.content:
+                    on_chunk(completion.content)
+                break
+
+            # Persist the assistant message with tool_calls into the in-process
+            # history so the next model call sees it.
+            msgs.append({
+                "role": "assistant",
+                "content": completion.content or None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": _json.dumps(tc["arguments"]),
+                        },
+                    }
+                    for tc in completion.tool_calls
+                ],
+            })
+
+            for tc in completion.tool_calls:
+                result_str = _dispatch_tool_call(
+                    tc, catalogue=catalogue, env=env, gate=gate,
+                    on_tool_event=on_tool_event,
+                )
+                msgs.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result_str,
+                })
+
+        # Final completion exists; persist its content and the aggregated usage.
+        assert completion is not None
         hub.append_message(session_id, role="assistant", content=completion.content)
         action.record_usage(
-            cost_usd=completion.cost_usd,
-            input_tokens=completion.usage.input_tokens,
-            output_tokens=completion.usage.output_tokens,
+            cost_usd=total_cost,
+            input_tokens=total_input,
+            output_tokens=total_output,
         )
-        # Summary for the action row — first line of the reply (or truncated).
         first_line = completion.content.strip().splitlines()[0] if completion.content else ""
         action.set_summary(first_line[:200])
 
+    # Surface the aggregate totals on the returned Completion so the REPL
+    # footer shows the whole loop, not just the last round.
+    completion.cost_usd = total_cost
+    completion.usage.input_tokens = total_input
+    completion.usage.output_tokens = total_output
     return completion
+
+
+def _dispatch_tool_call(
+    tc: dict[str, object],
+    *,
+    catalogue,
+    env,
+    gate,
+    on_tool_event: Callable[[str, str], None] | None,
+) -> str:
+    """Run one tool call from the model. Returns a string to feed back as the
+    `tool` message content. Errors are stringified rather than raised, so the
+    model can see what went wrong and adapt."""
+    from .agent_tools import classify_tool_call, dispatch
+
+    name = str(tc.get("name") or "")
+    args = tc.get("arguments") or {}
+    if name not in catalogue:
+        if on_tool_event:
+            on_tool_event("blocked", f"unknown tool: {name}")
+        return f"error: unknown tool {name!r}"
+    tool = catalogue[name]
+
+    if on_tool_event:
+        on_tool_event("call", f"{name}({_format_args(args)})")
+
+    # Pre-classify: tier-3 destructive calls are not auto-run from inside the
+    # agent loop. The user must promote via a slash command.
+    try:
+        decision = classify_tool_call(tool, args)
+    except Exception:
+        decision = None
+    if decision is not None and decision.tier.value == "destructive":
+        if on_tool_event:
+            on_tool_event("blocked", f"{name}: tier-3 (destructive) — not auto-run")
+        return (
+            f"BLOCKED (tier 3 / destructive): {decision.reason}. "
+            "Ask the user to run this via the matching slash command instead."
+        )
+
+    try:
+        result = dispatch(tool, dict(args), env, gate=gate)
+    except Exception as e:
+        if on_tool_event:
+            on_tool_event("result", f"{name}: exception {e}")
+        return f"exception: {e}"
+    if not result.ok:
+        if on_tool_event:
+            on_tool_event("result", f"{name}: error {result.error}")
+        return f"error: {result.error}"
+    out = _format_tool_result(result.result)
+    if on_tool_event:
+        summary = out if len(out) < 200 else out[:200] + "…"
+        on_tool_event("result", f"{name}: {summary}")
+    return out
+
+
+def _format_args(args: object) -> str:
+    if not isinstance(args, dict):
+        return repr(args)
+    parts = []
+    for k, v in args.items():
+        s = str(v)
+        if len(s) > 60:
+            s = s[:57] + "…"
+        parts.append(f"{k}={s}")
+    return ", ".join(parts)
+
+
+def _format_tool_result(result: object) -> str:
+    if result is None:
+        return "ok"
+    if isinstance(result, (str, int, float, bool)):
+        return str(result)
+    try:
+        return _json.dumps(result, default=str)[:4000]
+    except Exception:
+        return str(result)[:4000]
 
 
 def _switch_project(target_id, hub, config, host_id, console):
