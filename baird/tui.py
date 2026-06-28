@@ -53,6 +53,12 @@ from .repl import (
 from .tui_keys import read_key
 
 
+class FormParseError(ValueError):
+    """Raised by `collect_form_values` when a pre-supplied value is obviously
+    bogus (currently: starts with `--`, i.e. looks like an unparsed flag).
+    Slash-command callers catch this and surface the message to the user."""
+
+
 @dataclass
 class FormField:
     """One field in a `collect_form` form.
@@ -109,8 +115,21 @@ def collect_form_values(
 
     Returns the merged dict. Optional unset fields with no default are absent
     from the returned dict (callers should treat absence as "leave it alone").
+
+    Issue #2 fallback: refuse to submit when any pre-supplied value starts
+    with `--`. The slash arg parser catches this at parse time too — this
+    deeper layer means a regression in caller-side positional-merging logic
+    can't silently store a flag token as a real value.
     """
     known = dict(known or {})
+    for k, v in known.items():
+        if isinstance(v, str) and v.startswith("--"):
+            hint = v[2:].split()[0] if len(v) > 2 else ""
+            suffix = f" — did you mean `--{hint} <value>`?" if hint else ""
+            raise FormParseError(
+                f"value for {k!r} starts with '--' ({v!r}) — "
+                f"looks like an unparsed flag{suffix}"
+            )
     if console is not None:
         console.print(Panel(_form_status_table(fields, known), border_style="cyan", title="form"))
 

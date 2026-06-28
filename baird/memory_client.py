@@ -150,6 +150,28 @@ class HubClient:
         r.raise_for_status()
         return r.json()
 
+    def patch_project(self, project_id: str, **fields: Any) -> dict:
+        """Partial update of a project. Server accepts `name`, `github`,
+        `context`, `parent_id`, and `config` — only fields supplied here
+        are touched on the row."""
+        r = self._client.patch(f"/projects/{project_id}", json=fields)
+        r.raise_for_status()
+        return r.json()
+
+    def rename_project(self, project_id: str, new_name: str) -> dict:
+        """Convenience wrapper around `patch_project` for the common
+        rename case (issue #3)."""
+        return self.patch_project(project_id, name=new_name)
+
+    def delete_project(self, project_id: str) -> dict:
+        """Hard delete. Server rejects with 400 if the project has
+        children — caller must reparent or delete them first. Decisions,
+        sessions, actions referencing the project are left in place
+        (historical record; the FK is plain string, no DB cascade)."""
+        r = self._client.delete(f"/projects/{project_id}")
+        r.raise_for_status()
+        return r.json()
+
     # ---- Project locations ----
 
     def list_project_locations(self, project_id: str) -> list[dict]:

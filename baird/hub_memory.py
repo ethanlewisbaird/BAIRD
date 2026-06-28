@@ -323,6 +323,52 @@ def register_routes(app: FastAPI) -> None:
         s.refresh(row)
         return _project_out(row)
 
+    @app.patch("/projects/{project_id}", response_model=ProjectOut)
+    def patch_project(
+        project_id: str, payload: dict, s: Session = Depends(get_memory)
+    ) -> ProjectOut:
+        """Partial update — only fields present in `payload` are touched.
+        Used by `/project rename` to set just the display name without
+        round-tripping every other field through `POST /projects`."""
+        row = s.get(Project, project_id)
+        if row is None:
+            raise HTTPException(404, "project not found")
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "payload must be a JSON object")
+        allowed = {"name", "github", "context", "config", "parent_id"}
+        unknown = set(payload) - allowed
+        if unknown:
+            raise HTTPException(400, f"unknown fields: {sorted(unknown)}")
+        if "name" in payload:
+            if not isinstance(payload["name"], str) or not payload["name"].strip():
+                raise HTTPException(400, "name must be a non-empty string")
+            row.name = payload["name"]
+        if "github" in payload:
+            row.github = payload["github"]
+        if "context" in payload:
+            row.context = payload["context"]
+        if "parent_id" in payload:
+            new_parent = payload["parent_id"] or None
+            cfg = dict(row.config or {})
+            if new_parent is not None:
+                _validate_parent_id(s, child_id=project_id, parent_id=new_parent)
+                if (row.config or {}).get("parent_id") != new_parent and _children_of(s, project_id):
+                    raise HTTPException(
+                        400,
+                        f"cannot set parent_id on {project_id!r}: it already has children",
+                    )
+                cfg["parent_id"] = new_parent
+            else:
+                cfg.pop("parent_id", None)
+            row.config = cfg
+        if "config" in payload:
+            if not isinstance(payload["config"], dict):
+                raise HTTPException(400, "config must be an object")
+            row.config = dict(payload["config"])
+        s.commit()
+        s.refresh(row)
+        return _project_out(row)
+
     @app.get("/projects/{project_id}/children", response_model=list[ProjectOut])
     def list_project_children(
         project_id: str, s: Session = Depends(get_memory)
@@ -342,6 +388,27 @@ def register_routes(app: FastAPI) -> None:
         if row is None:
             raise HTTPException(404, "project not found")
         return _project_out(row)
+
+    @app.delete("/projects/{project_id}")
+    def delete_project(project_id: str, s: Session = Depends(get_memory)) -> dict:
+        """Hard delete. Decisions / sessions / messages that reference this
+        project_id are left in place — they're historical record and the FK
+        is plain string (no DB cascade). Parent-with-children is rejected;
+        the caller must reparent or delete children first."""
+        row = s.get(Project, project_id)
+        if row is None:
+            raise HTTPException(404, "project not found")
+        kids = _children_of(s, project_id)
+        if kids:
+            child_ids = sorted(k.id for k in kids)
+            raise HTTPException(
+                400,
+                f"cannot delete {project_id!r}: has {len(kids)} child project(s) "
+                f"({', '.join(child_ids)}). Reparent or delete them first.",
+            )
+        s.delete(row)
+        s.commit()
+        return {"deleted": project_id}
 
     # ---- Project locations ----
     # Locations are stored inside `Project.config["locations"]` (JSON). We also

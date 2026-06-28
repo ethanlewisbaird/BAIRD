@@ -13,6 +13,7 @@ import pytest
 from baird.agent_tools import ToolEnv
 from baird.slash import (
     SlashContext,
+    parse_inline_args,
     parse_kv_args,
     try_dispatch,
 )
@@ -87,6 +88,94 @@ def test_parse_kv_args_splits_positional_and_kv() -> None:
     pos, kv = parse_kv_args(["scrna", "name=scRNA", "github=me/scrna"])
     assert pos == ["scrna"]
     assert kv == {"name": "scRNA", "github": "me/scrna"}
+
+
+def test_parse_inline_args_generic_double_dash_flags() -> None:
+    """Issue #1: `--<field> <value>` must work for ANY field, not just --parent."""
+    pos, kv, err = parse_inline_args(
+        ["scrna", "--name", "scRNA", "--github", "me/x", "--locations", "h:/p"]
+    )
+    assert err is None
+    assert pos == ["scrna"]
+    assert kv == {"name": "scRNA", "github": "me/x", "locations": "h:/p"}
+
+
+def test_parse_inline_args_equals_form() -> None:
+    pos, kv, err = parse_inline_args(["p", "--name=Spatial", "--parent=scentinel"])
+    assert err is None
+    assert pos == ["p"]
+    assert kv == {"name": "Spatial", "parent": "scentinel"}
+
+
+def test_parse_inline_args_rejects_flag_value() -> None:
+    pos, kv, err = parse_inline_args(["--name", "--locations"])
+    assert err is not None and "flag-looking value" in err
+
+
+def test_parse_inline_args_rejects_dangling_flag() -> None:
+    pos, kv, err = parse_inline_args(["scrna", "--name"])
+    assert err is not None and "missing a value" in err
+
+
+# ---- /project new — generic --<field> support (issue #1) ----------------
+
+
+def test_project_new_inline_locations_double_dash_flag() -> None:
+    """The exact failing transcript from issue #1: --locations was being
+    swallowed into the positional `name` slot. Must land in `locations`."""
+    ctx, hub, _ = _ctx(answers=[])
+    hub.list_projects.return_value = [{"id": "scentinel", "name": "S"}]
+    hub.upsert_project.return_value = {"id": "scentinel-spatial"}
+    hub.add_project_location.return_value = []
+    r = try_dispatch(
+        "project new scentinel-spatial --parent scentinel "
+        "--locations GPU-wrkstn:/data-hdd0/Ethan_Baird/Dec25_xenium",
+        ctx,
+    )
+    assert r.handled and r.ok, r.output
+    hub.upsert_project.assert_called_once_with(
+        id="scentinel-spatial",
+        name="scentinel-spatial",
+        github=None,
+        parent_id="scentinel",
+    )
+    hub.add_project_location.assert_called_once_with(
+        "scentinel-spatial",
+        host="GPU-wrkstn",
+        path="/data-hdd0/Ethan_Baird/Dec25_xenium",
+        role=None,
+    )
+
+
+def test_project_new_inline_name_double_dash_flag() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.upsert_project.return_value = {"id": "p"}
+    r = try_dispatch("project new p --name 'Real Name'", ctx)
+    assert r.handled and r.ok, r.output
+    assert hub.upsert_project.call_args.kwargs["name"] == "Real Name"
+
+
+def test_project_new_inline_github_double_dash_flag() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.upsert_project.return_value = {"id": "p"}
+    r = try_dispatch("project new p --github org/repo", ctx)
+    assert r.handled and r.ok, r.output
+    assert hub.upsert_project.call_args.kwargs["github"] == "org/repo"
+
+
+def test_project_add_location_double_dash_flags() -> None:
+    """The generic flag parser must also serve /project add-location."""
+    ctx, hub, _ = _ctx(answers=[])
+    hub.add_project_location.return_value = [
+        {"host": "hibu", "path": "/data", "role": "data"}
+    ]
+    r = try_dispatch(
+        "project add-location scrna --host hibu --path /data --role data", ctx
+    )
+    assert r.handled and r.ok, r.output
+    hub.add_project_location.assert_called_once_with(
+        "scrna", host="hibu", path="/data", role="data"
+    )
 
 
 # ---- /project new ----------------------------------------------------
@@ -380,3 +469,134 @@ def test_project_siblings_top_level_says_so() -> None:
 def test_unknown_command_returns_none() -> None:
     ctx, _hub, _exec = _ctx(answers=[])
     assert try_dispatch("nonsense", ctx) is None
+
+
+# ---- /project rename (issue #3) -----------------------------------------
+
+
+def test_project_rename_inline() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.rename_project.return_value = {"id": "scentinel-spatial", "name": "Spatial"}
+    r = try_dispatch("project rename scentinel-spatial Spatial", ctx)
+    assert r.handled and r.ok, r.output
+    hub.rename_project.assert_called_once_with("scentinel-spatial", "Spatial")
+    assert "Spatial" in r.output
+
+
+def test_project_rename_accepts_spaces_in_name() -> None:
+    """`/project rename <id> <name with spaces>` — everything after the id
+    is the name. No quoting required (issue #3)."""
+    ctx, hub, _ = _ctx(answers=[])
+    hub.rename_project.return_value = {
+        "id": "p", "name": "Spatial Transcriptomics"
+    }
+    r = try_dispatch("project rename p Spatial Transcriptomics", ctx)
+    assert r.handled and r.ok, r.output
+    hub.rename_project.assert_called_once_with("p", "Spatial Transcriptomics")
+
+
+def test_project_rename_form_prompts_for_missing() -> None:
+    ctx, hub, _ = _ctx(answers=["p", "New Name"])
+    hub.rename_project.return_value = {"id": "p", "name": "New Name"}
+    r = try_dispatch("project rename", ctx)
+    assert r.handled and r.ok
+    hub.rename_project.assert_called_once_with("p", "New Name")
+
+
+def test_project_rename_propagates_hub_error() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.rename_project.side_effect = RuntimeError("404 not found")
+    r = try_dispatch("project rename missing X", ctx)
+    assert r.handled and not r.ok
+    assert "failed to rename" in r.output
+
+
+# ---- /project delete (issue #4) -----------------------------------------
+
+
+def test_project_delete_confirmed() -> None:
+    ctx, hub, _ = _ctx(answers=["y"])  # y to the y/N prompt
+    hub.get_project.return_value = {"id": "leaf", "name": "Leaf"}
+    hub.list_children.return_value = []
+    hub.delete_project.return_value = {"deleted": "leaf"}
+    r = try_dispatch("project delete leaf", ctx)
+    assert r.handled and r.ok, r.output
+    hub.delete_project.assert_called_once_with("leaf")
+    assert "deleted project leaf" in r.output
+
+
+def test_project_delete_aborted_on_no() -> None:
+    ctx, hub, _ = _ctx(answers=["n"])
+    hub.get_project.return_value = {"id": "leaf", "name": "Leaf"}
+    hub.list_children.return_value = []
+    r = try_dispatch("project delete leaf", ctx)
+    assert r.handled and r.ok
+    hub.delete_project.assert_not_called()
+    assert "aborted" in r.output
+
+
+def test_project_delete_blocked_when_children_exist() -> None:
+    """Client refuses up-front when children are present so the user sees a
+    clear message before the hub round-trip."""
+    ctx, hub, _ = _ctx(answers=[])  # no prompt should fire
+    hub.get_project.return_value = {"id": "umbrella", "name": "Umbrella"}
+    hub.list_children.return_value = [{"id": "child-a"}, {"id": "child-b"}]
+    r = try_dispatch("project delete umbrella", ctx)
+    assert r.handled and not r.ok
+    hub.delete_project.assert_not_called()
+    assert "child-a" in r.output and "child-b" in r.output
+
+
+def test_project_delete_unknown_project() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.get_project.side_effect = RuntimeError("404")
+    r = try_dispatch("project delete missing", ctx)
+    assert r.handled and not r.ok
+    hub.delete_project.assert_not_called()
+    assert "project not found" in r.output
+
+
+def test_project_delete_propagates_hub_error_on_delete() -> None:
+    ctx, hub, _ = _ctx(answers=["y"])
+    hub.get_project.return_value = {"id": "leaf", "name": "Leaf"}
+    hub.list_children.return_value = []
+    hub.delete_project.side_effect = RuntimeError("500 boom")
+    r = try_dispatch("project delete leaf", ctx)
+    assert r.handled and not r.ok
+    assert "failed to delete" in r.output
+
+
+# ---- Issue #2 guard: flag-looking values are rejected -------------------
+
+
+def test_collect_form_values_rejects_flag_value_in_known() -> None:
+    """The collect_form_values fallback raises FormParseError when a
+    pre-supplied value starts with '--' — defends against any caller path
+    that bypasses the slash parser's check."""
+    from baird.tui import FormField, FormParseError, collect_form_values
+
+    fields = [FormField("name", "name", required=True)]
+    with pytest.raises(FormParseError) as ei:
+        collect_form_values(
+            fields, {"name": "--locations"}, input_fn=lambda _p: "x", console=None
+        )
+    assert "unparsed flag" in str(ei.value)
+
+
+def test_project_new_rejects_dangling_flag() -> None:
+    """`/project new p --locations` (no value) must error, not create."""
+    ctx, hub, _ = _ctx(answers=[])
+    r = try_dispatch("project new p --locations", ctx)
+    assert r.handled and not r.ok
+    assert "missing a value" in r.output
+    hub.upsert_project.assert_not_called()
+
+
+def test_project_new_rejects_flag_value() -> None:
+    """`/project new --name --locations h:/p` must error, not store
+    name='--locations'."""
+    ctx, hub, _ = _ctx(answers=[])
+    r = try_dispatch("project new p --name --locations h:/p", ctx)
+    assert r.handled and not r.ok
+    assert "flag-looking value" in r.output or "unparsed flag" in r.output
+    hub.upsert_project.assert_not_called()
