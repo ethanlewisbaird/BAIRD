@@ -26,7 +26,7 @@ def _spec(tmp_path: Path, scope: str) -> hub_install.InstallSpec:
         baird_bin="/opt/baird/.venv/bin/baird",
         baird_home=tmp_path / ".baird",
         home=tmp_path,
-        user="ethan",
+        user="user",
         system_unit_dir=tmp_path / "etc-systemd",
         user_unit_dir=tmp_path / "user-systemd",
     )
@@ -47,8 +47,8 @@ def test_render_units_user_scope(tmp_path: Path) -> None:
 
 def test_render_units_system_scope_sets_user_and_target(tmp_path: Path) -> None:
     hub = hub_install.render_units(_spec(tmp_path, "system"))["baird-hub.service"]
-    assert "User=ethan" in hub
-    assert "Group=ethan" in hub
+    assert "User=user" in hub
+    assert "Group=user" in hub
     assert "WantedBy=multi-user.target" in hub
 
 

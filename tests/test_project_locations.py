@@ -28,14 +28,14 @@ def test_locations_round_trip(tmp_path: Path) -> None:
         id="p",
         name="P",
         locations=[
-            Location(host="hibu", path="/data/x", role="data"),
+            Location(host="workstation", path="/data/x", role="data"),
             Location(host="gpu", path="/scratch/x", role="compute"),
         ],
     )
     path = tmp_path / "project.yaml"
     save_project_yaml(py, path)
     loaded = load_project_yaml(path)
-    assert [loc.host for loc in loaded.locations] == ["hibu", "gpu"]
+    assert [loc.host for loc in loaded.locations] == ["workstation", "gpu"]
     assert loaded.locations[0].role == "data"
 
 
@@ -43,11 +43,11 @@ def test_effective_locations_uses_new_field() -> None:
     py = ProjectYaml(
         id="p",
         name="P",
-        locations=[Location(host="hibu", path="/x")],
+        locations=[Location(host="workstation", path="/x")],
         checkout_hosts=[CheckoutHost(host_id="laptop", path="/y")],
     )
     locs = effective_locations(py)
-    assert len(locs) == 1 and locs[0].host == "hibu"
+    assert len(locs) == 1 and locs[0].host == "workstation"
 
 
 def test_effective_locations_falls_back_to_checkout_hosts() -> None:
@@ -77,11 +77,11 @@ def test_add_remove_locations(client: TestClient) -> None:
 
     r = client.post(
         "/projects/p/locations",
-        json={"host": "hibu", "path": "/data", "role": "data"},
+        json={"host": "workstation", "path": "/data", "role": "data"},
     )
     assert r.status_code == 200
     body = r.json()
-    assert len(body) == 1 and body[0]["host"] == "hibu"
+    assert len(body) == 1 and body[0]["host"] == "workstation"
 
     client.post(
         "/projects/p/locations",
@@ -92,12 +92,12 @@ def test_add_remove_locations(client: TestClient) -> None:
     # Adding the same (host, path) again replaces, doesn't duplicate.
     r3 = client.post(
         "/projects/p/locations",
-        json={"host": "hibu", "path": "/data", "role": "primary-data"},
+        json={"host": "workstation", "path": "/data", "role": "primary-data"},
     )
     body3 = r3.json()
     assert len(body3) == 2
-    hibu = next(loc for loc in body3 if loc["host"] == "hibu")
-    assert hibu["role"] == "primary-data"
+    workstation = next(loc for loc in body3 if loc["host"] == "workstation")
+    assert workstation["role"] == "primary-data"
 
     # Delete one.
     r4 = client.request(
@@ -105,7 +105,7 @@ def test_add_remove_locations(client: TestClient) -> None:
         "/projects/p/locations",
         params={"host": "gpu", "path": "/scratch"},
     )
-    assert [loc["host"] for loc in r4.json()] == ["hibu"]
+    assert [loc["host"] for loc in r4.json()] == ["workstation"]
 
 
 def test_locations_404_for_missing_project(client: TestClient) -> None:
@@ -126,7 +126,7 @@ def test_legacy_checkout_hosts_visible_via_locations(client: TestClient) -> None
             "name": "legacy",
             "config": {
                 "checkout_hosts": [
-                    {"host_id": "laptop", "path": "/home/ethan/proj", "branch": "main"},
+                    {"host_id": "laptop", "path": "/home/user/proj", "branch": "main"},
                 ]
             },
         },
@@ -134,5 +134,5 @@ def test_legacy_checkout_hosts_visible_via_locations(client: TestClient) -> None
     rows = client.get("/projects/legacy/locations").json()
     assert len(rows) == 1
     assert rows[0]["host"] == "laptop"
-    assert rows[0]["path"] == "/home/ethan/proj"
+    assert rows[0]["path"] == "/home/user/proj"
     assert rows[0]["role"] == "repo"

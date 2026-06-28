@@ -38,7 +38,7 @@ def _reader(contents: dict[str, str]):
 def test_probe_reads_readme_and_truncates() -> None:
     long_readme = "\n".join(f"line {i}" for i in range(100))
     reader = _reader({"/proj/README.md": long_readme})
-    probe = probe_location(reader, "hibu", "/proj")
+    probe = probe_location(reader, "workstation", "/proj")
     assert probe.readme is not None
     assert probe.readme.count("\n") + 1 <= 40
 
@@ -120,7 +120,7 @@ def test_propose_skips_already_filled_fields() -> None:
 def test_propose_env_combines_signals_across_locations() -> None:
     current = {"id": "p", "config": {}}
     probes = [
-        _probe_with(host="hibu", path="/d", conda_env_name="scrna-env"),
+        _probe_with(host="workstation", path="/d", conda_env_name="scrna-env"),
         _probe_with(host="gpu", path="/c", has_dockerfile=True),
     ]
     prop = propose_enrichment(current, probes).by_field()
@@ -161,7 +161,7 @@ class _FakeExecutor:
 def _stub_satellite_registry(monkeypatch):
     monkeypatch.setattr(
         "baird.satellite.load_registry",
-        lambda: {"hibu": {"local_fwd_port": 0, "executor_auth_token": "x"}},
+        lambda: {"workstation": {"local_fwd_port": 0, "executor_auth_token": "x"}},
     )
 
 
@@ -170,7 +170,7 @@ def _slash_ctx(files: dict[str, str], answers: list[str]):
     ex = _FakeExecutor(files)
     env = ToolEnv(
         hub=hub,
-        executors={"hibu": ("u", "t")},
+        executors={"workstation": ("u", "t")},
         executor_factory=lambda *_: ex,
     )
     it = iter(answers)
@@ -199,7 +199,7 @@ def test_project_enrich_proposes_and_saves(monkeypatch) -> None:
         "context": None, "config": {},
     }
     hub.list_project_locations.return_value = [
-        {"host": "hibu", "path": "/proj", "role": None},
+        {"host": "workstation", "path": "/proj", "role": None},
     ]
     r = try_dispatch("project enrich scrna", ctx)
     assert r.handled and r.ok, r.output
@@ -233,16 +233,16 @@ def test_project_new_auto_runs_enrichment(monkeypatch) -> None:
         {"id": "scrna"},  # enrichment save
     ]
     hub.add_project_location.return_value = [
-        {"host": "hibu", "path": "/proj", "role": None}
+        {"host": "workstation", "path": "/proj", "role": None}
     ]
     hub.get_project.return_value = {
         "id": "scrna", "name": "scrna", "github": None,
         "context": None, "config": {},
     }
     hub.list_project_locations.return_value = [
-        {"host": "hibu", "path": "/proj", "role": None},
+        {"host": "workstation", "path": "/proj", "role": None},
     ]
-    r = try_dispatch("project new scrna locations=hibu:/proj", ctx)
+    r = try_dispatch("project new scrna locations=workstation:/proj", ctx)
     assert r.handled and r.ok, r.output
     # Two upsert_project calls: create + enrichment save.
     assert hub.upsert_project.call_count == 2

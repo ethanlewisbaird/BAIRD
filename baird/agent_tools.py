@@ -210,7 +210,7 @@ def _family_projects(env: ToolEnv, project_id: str) -> list[dict]:
     For an umbrella project, returns `[self, ...children]`.
 
     Used by `where` so the agent can find files across the whole research
-    programme when working inside one assay — the SCENTINEL use case.
+    programme when working inside one assay — the umbrella programme use case.
     """
     try:
         me = env.hub.get_project(project_id)
@@ -414,7 +414,7 @@ def build_catalogue() -> dict[str, Tool]:
                 "Attach a (host, path) location to a project. CALL THIS "
                 "whenever the user describes where a project lives — "
                 "phrases like 'data is on the GPU workstation at /data/x', "
-                "'location = hibu /scratch/y', 'the laptop has the "
+                "'location = workstation /scratch/y', 'the laptop has the "
                 "notebooks under …', or 'add another location for this "
                 "project'. The host argument is a satellite host_id from "
                 "the enrolled-hosts registry (see `baird satellite list`); "
@@ -508,7 +508,7 @@ def build_catalogue() -> dict[str, Tool]:
             description=(
                 "List sibling project ids — other children of the same parent. "
                 "CALL THIS when the user references another assay in the same "
-                "research programme ('what other assays are under SCENTINEL?', "
+                "research programme ('what other assays are under umbrella programme?', "
                 "'list the other cohorts'), or when you need to know which "
                 "family members `where` would search. Empty list for top-level "
                 "projects (no parent → no siblings)."

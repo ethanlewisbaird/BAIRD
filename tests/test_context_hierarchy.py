@@ -20,7 +20,7 @@ from baird.project_yaml import ProjectYaml
 
 
 def _hub_with_parent(
-    parent_id: str = "scentinel",
+    parent_id: str = "umbrella",
     parent_context: str | None = "Umbrella research programme.",
     parent_goals: list[dict] | None = None,
     siblings: list[dict] | None = None,
@@ -44,18 +44,18 @@ def _hub_with_parent(
         },
     }
     hub.list_children.return_value = siblings or [
-        {"id": "scentinel-scrna", "name": "scRNA"},
-        {"id": "scentinel-spatial", "name": "spatial"},
+        {"id": "umbrella-scrna", "name": "scRNA"},
+        {"id": "umbrella-spatial", "name": "spatial"},
     ]
     return hub
 
 
 def test_lite_context_loads_parent_when_parent_id_set() -> None:
     hub = _hub_with_parent()
-    py = ProjectYaml(id="scentinel-scrna", name="scRNA", parent_id="scentinel")
+    py = ProjectYaml(id="umbrella-scrna", name="scRNA", parent_id="umbrella")
     ctx = lite_repo_context(py, hub=hub)
     assert ctx.parent is not None
-    assert ctx.parent.id == "scentinel"
+    assert ctx.parent.id == "umbrella"
     assert "Umbrella" in (ctx.parent.context or "")
 
 
@@ -68,7 +68,7 @@ def test_parent_active_goals_filter_done_and_abandoned() -> None:
             {"id": "d", "text": "Active 2", "status": "active"},
         ]
     )
-    py = ProjectYaml(id="child", name="child", parent_id="scentinel")
+    py = ProjectYaml(id="child", name="child", parent_id="umbrella")
     ctx = lite_repo_context(py, hub=hub)
     assert ctx.parent is not None
     goals = ctx.parent.active_goals
@@ -90,32 +90,32 @@ def test_no_parent_loaded_when_no_parent_id() -> None:
 def test_parent_load_failure_degrades_gracefully() -> None:
     hub = _hub_with_parent()
     hub.get_project.side_effect = RuntimeError("hub down")
-    py = ProjectYaml(id="child", name="child", parent_id="scentinel")
+    py = ProjectYaml(id="child", name="child", parent_id="umbrella")
     ctx = lite_repo_context(py, hub=hub)
     assert ctx.parent is None
 
 
 def test_render_includes_parent_section_marked_inherited() -> None:
-    py = ProjectYaml(id="child", name="child", parent_id="scentinel")
+    py = ProjectYaml(id="child", name="child", parent_id="umbrella")
     ctx = RepoContext(
         project=py,
         project_root=None,
         branch=None,
         parent=ParentContext(
-            id="scentinel",
-            name="SCENTINEL",
+            id="umbrella",
+            name="umbrella programme",
             context="Umbrella research programme spanning multiple assays.",
             active_goals=["Cross-cohort meta-analysis", "Grant submission"],
-            sibling_ids=[("scentinel-spatial", "spatial")],
+            sibling_ids=[("umbrella-spatial", "spatial")],
         ),
     )
     out = render_context(ctx)
-    assert "## Parent (SCENTINEL)" in out
+    assert "## Parent (umbrella programme)" in out
     assert "inherited" in out.lower()
     assert "Umbrella research programme" in out
     assert "Cross-cohort meta-analysis" in out
     assert "Grant submission" in out
-    assert "scentinel-spatial" in out
+    assert "umbrella-spatial" in out
 
 
 def test_render_omits_parent_section_when_top_level() -> None:
@@ -134,8 +134,8 @@ def test_parent_inheritance_loader_drops_rules_and_aliases() -> None:
     hub.list_project_locations.return_value = []
     hub.list_children.return_value = []
     hub.get_project.return_value = {
-        "id": "scentinel",
-        "name": "SCENTINEL",
+        "id": "umbrella",
+        "name": "umbrella programme",
         "context": "Umbrella.",
         "parent_id": None,
         "config": {
@@ -144,7 +144,7 @@ def test_parent_inheritance_loader_drops_rules_and_aliases() -> None:
             "rules": [{"id": "r", "description": "secret rule", "check": "x"}],
         },
     }
-    py = ProjectYaml(id="child", name="child", parent_id="scentinel")
+    py = ProjectYaml(id="child", name="child", parent_id="umbrella")
     ctx = lite_repo_context(py, hub=hub)
     assert ctx.parent is not None
     # ParentContext dataclass only carries context + goals + siblings.
@@ -159,13 +159,13 @@ def test_parent_inheritance_loader_drops_rules_and_aliases() -> None:
 def test_sibling_ids_exclude_self() -> None:
     hub = _hub_with_parent(
         siblings=[
-            {"id": "scentinel-scrna", "name": "scRNA"},
-            {"id": "scentinel-spatial", "name": "spatial"},
+            {"id": "umbrella-scrna", "name": "scRNA"},
+            {"id": "umbrella-spatial", "name": "spatial"},
         ]
     )
-    py = ProjectYaml(id="scentinel-scrna", name="scRNA", parent_id="scentinel")
+    py = ProjectYaml(id="umbrella-scrna", name="scRNA", parent_id="umbrella")
     ctx = lite_repo_context(py, hub=hub)
     assert ctx.parent is not None
     sib_ids = [sid for sid, _ in ctx.parent.sibling_ids]
-    assert "scentinel-spatial" in sib_ids
-    assert "scentinel-scrna" not in sib_ids  # self excluded
+    assert "umbrella-spatial" in sib_ids
+    assert "umbrella-scrna" not in sib_ids  # self excluded

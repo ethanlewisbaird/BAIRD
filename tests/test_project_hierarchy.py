@@ -21,11 +21,11 @@ from baird.project_yaml import ProjectYaml
 def test_project_yaml_round_trip_with_parent_id(tmp_path) -> None:
     from baird.project_yaml import load_project_yaml, save_project_yaml
 
-    py = ProjectYaml(id="scrna", name="scRNA", parent_id="scentinel")
+    py = ProjectYaml(id="scrna", name="scRNA", parent_id="umbrella")
     path = tmp_path / "p.yaml"
     save_project_yaml(py, path)
     loaded = load_project_yaml(path)
-    assert loaded.parent_id == "scentinel"
+    assert loaded.parent_id == "umbrella"
 
 
 def test_project_yaml_parent_id_defaults_none() -> None:
@@ -36,14 +36,14 @@ def test_project_yaml_parent_id_defaults_none() -> None:
 # ---- Hub create + read ------------------------------------------------
 
 def test_create_parent_then_child(client: TestClient) -> None:
-    client.post("/projects", json={"id": "scentinel", "name": "SCENTINEL"})
+    client.post("/projects", json={"id": "umbrella", "name": "umbrella programme"})
     r = client.post(
         "/projects",
-        json={"id": "scentinel-scrna", "name": "scRNA", "parent_id": "scentinel"},
+        json={"id": "umbrella-scrna", "name": "scRNA", "parent_id": "umbrella"},
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["parent_id"] == "scentinel"
+    assert body["parent_id"] == "umbrella"
 
 
 def test_get_project_includes_parent_id(client: TestClient) -> None:
