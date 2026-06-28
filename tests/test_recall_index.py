@@ -88,6 +88,35 @@ def test_search_filters_by_source(cfg, tmp_path: Path):
 
 
 @_skip_no_recall
+def test_search_filters_by_project_ids_list(cfg, tmp_path: Path):
+    """`project_ids=[...]` scopes the query to a set — used for sibling-aware
+    recall under the one-level parent/child hierarchy."""
+    from baird import recall_index
+
+    table = recall_index.ensure_index(cfg, lance_dir=tmp_path / "lance")
+    for pid in ("parent", "child-a", "child-b", "unrelated"):
+        recall_index.upsert_fragment(
+            table, source="action", source_id=f"{pid}-1", project_id=pid,
+            text=f"shared keyword in {pid}",
+        )
+
+    family = recall_index.search(
+        table, query="shared keyword", k=10,
+        project_ids=["parent", "child-a", "child-b"],
+    )
+    pids = {r["project_id"] for r in family}
+    assert pids == {"parent", "child-a", "child-b"}
+    assert "unrelated" not in pids
+
+    # Singular still works and is mutually exclusive (project_ids takes
+    # precedence when both are passed).
+    single = recall_index.search(
+        table, query="shared keyword", k=10, project_id="parent",
+    )
+    assert {r["project_id"] for r in single} == {"parent"}
+
+
+@_skip_no_recall
 def test_promote_action_writes_tier_3(cfg, tmp_path: Path):
     from baird import recall_index
 
