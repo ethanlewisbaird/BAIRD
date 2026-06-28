@@ -458,6 +458,9 @@ def project_init(
     project_id: str = typer.Argument(..., help="Stable project id (slug)"),
     name: str = typer.Option(None, "--name", help="Human-readable name (defaults to id)"),
     github: str | None = typer.Option(None, "--github"),
+    parent: str | None = typer.Option(
+        None, "--parent", help="Parent project id — creates a child under that umbrella"
+    ),
     force: bool = typer.Option(False, "--force", help="Overwrite existing .baird/project.yaml"),
 ) -> None:
     """Create `.baird/project.yaml` in the current directory."""
@@ -465,9 +468,56 @@ def project_init(
     if path.exists() and not force:
         console.print(f"[red]{path} already exists (use --force to overwrite)[/red]")
         raise typer.Exit(1)
-    template = project_yaml_template(project_id, name or project_id, github=github)
+    if parent is not None:
+        from .project_yaml import SubprojectError, validate_hierarchy
+
+        try:
+            with _hub_client_from_host() as hub:
+                parent_row = hub.get_project(parent)
+        except Exception as e:
+            console.print(f"[red]parent {parent!r} not found on hub:[/red] {e}")
+            raise typer.Exit(1)
+        parent_yaml = ProjectYaml(
+            id=parent_row["id"],
+            name=parent_row["name"],
+            github=parent_row.get("github"),
+            context=parent_row.get("context"),
+            **(parent_row.get("config") or {}),
+        )
+        template = project_yaml_template(
+            project_id, name or project_id, github=github, parent_id=parent
+        )
+        try:
+            validate_hierarchy(template, parent_yaml)
+        except SubprojectError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1)
+    else:
+        template = project_yaml_template(project_id, name or project_id, github=github)
     save_project_yaml(template, path)
     console.print(f"[green]wrote[/green] {path}")
+
+
+@project_app.command("tree")
+def project_tree() -> None:
+    """Show the parent/child hierarchy of projects on the hub."""
+    with _hub_client_from_host() as hub:
+        rows = hub.list_projects()
+    by_id = {r["id"]: r for r in rows}
+    parents: dict[str | None, list[dict]] = {}
+    for r in rows:
+        pid = (r.get("config") or {}).get("parent_id")
+        # Treat orphaned children (parent_id points nowhere) as top-level.
+        if pid is not None and pid not in by_id:
+            pid = None
+        parents.setdefault(pid, []).append(r)
+    if not rows:
+        console.print("[dim]no projects[/dim]")
+        return
+    for top in parents.get(None, []):
+        console.print(f"[bold]{top['id']}[/bold]  {top['name']}")
+        for child in parents.get(top["id"], []):
+            console.print(f"  └─ {child['id']}  {child['name']}")
 
 
 @project_app.command("push")

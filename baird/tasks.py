@@ -66,6 +66,12 @@ class Runnable(BaseModel):
     model: str = "anthropic/claude-3-haiku"
     system: str | None = None
     project_id: str | None = None
+    # Multi-project fanout. When set, the task fires once PER resolved project
+    # id (each firing gets its own Action + Session). If an entry names a
+    # parent project, the runner expands it to that parent's children
+    # (per the subproject-hierarchy design). `project_id` is used only when
+    # `project_ids` is empty.
+    project_ids: list[str] = Field(default_factory=list)
     context_sources: list[str] = Field(default_factory=list)  # e.g. ["repo", "decisions", "rules"]
     max_tokens: int = 1024
     temperature: float = 0.2
@@ -145,6 +151,42 @@ def task_yaml_template(task_id: str) -> Task:
     )
 
 
+def resolve_project_ids(runnable: "Runnable", hub: Any) -> list[str | None]:
+    """Expand `runnable.project_ids` (or fall back to singular `project_id`)
+    into the concrete list of project ids to fire against.
+
+    Parent ids expand to their children (one-level hierarchy). Duplicates are
+    removed while preserving first-seen order. An empty result means "fire once
+    with no project context" (returns `[None]`)."""
+    raw = list(runnable.project_ids) if runnable.project_ids else (
+        [runnable.project_id] if runnable.project_id else []
+    )
+    if not raw:
+        return [None]
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for pid in raw:
+        if pid is None:
+            continue
+        children: list[dict] = []
+        try:
+            children = hub.list_children(pid)
+        except Exception:
+            children = []
+        if children:
+            for child in children:
+                cid = child["id"]
+                if cid not in seen:
+                    seen.add(cid)
+                    out.append(cid)
+        else:
+            if pid not in seen:
+                seen.add(pid)
+                out.append(pid)
+    return list(out) if out else [None]
+
+
 __all__ = [
     "Task",
     "Trigger",
@@ -152,6 +194,7 @@ __all__ = [
     "IntervalTrigger",
     "WatchTrigger",
     "ReactiveTrigger",
+    "resolve_project_ids",
     "Runnable",
     "Budget",
     "load_task",

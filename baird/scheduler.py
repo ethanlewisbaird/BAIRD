@@ -42,7 +42,7 @@ from .event_bus import EventBus, default_bus
 from .memory_client import HubClient
 from .model import OpenRouterClient
 from .notifier import Notifier
-from .runner import run_task_once
+from .runner import run_task_fanout, run_task_once  # noqa: F401
 from .tasks import (
     CronTrigger,
     IntervalTrigger,
@@ -288,7 +288,7 @@ class Scheduler:
 
     def _do_fire(self, task: Task) -> Any:
         try:
-            return run_task_once(
+            return run_task_fanout(
                 task,
                 hub=self.hub,
                 model_client=self.model_client,

@@ -20,7 +20,7 @@ from pathlib import Path
 from .memory_client import HubClient
 from .model import Completion, OpenRouterClient
 from .notifier import Notifier
-from .tasks import Task
+from .tasks import Task, resolve_project_ids
 
 log = logging.getLogger("baird.runner")
 
@@ -169,6 +169,59 @@ def run_task_once(
         truncated=truncated,
         summary=summary,
     )
+
+
+def run_task_fanout(
+    task: Task,
+    *,
+    hub: HubClient,
+    model_client: OpenRouterClient,
+    notifier: Notifier | None = None,
+    host_id: str | None = None,
+    project_root: Path | None = None,
+) -> list[FiringResult]:
+    """Resolve `runnable.project_ids` (expanding parents to children) and fire
+    once per resolved id. Returns one FiringResult per firing.
+
+    If neither `project_ids` nor a parent expansion applies, this is identical
+    to a single `run_task_once` and returns a list of length one."""
+    runnable = task.runnable
+    resolved = resolve_project_ids(runnable, hub)
+    # No fanout needed — preserve singular-task semantics.
+    if len(resolved) == 1 and resolved[0] == runnable.project_id:
+        return [run_task_once(
+            task,
+            hub=hub,
+            model_client=model_client,
+            notifier=notifier,
+            host_id=host_id,
+            project_root=project_root,
+        )]
+
+    results: list[FiringResult] = []
+    for pid in resolved:
+        # Shallow-clone the task so each firing carries its own project_id
+        # without mutating the caller's task.
+        per_runnable = runnable.model_copy(update={"project_id": pid, "project_ids": []})
+        per_task = task.model_copy(update={"runnable": per_runnable})
+        try:
+            results.append(
+                run_task_once(
+                    per_task,
+                    hub=hub,
+                    model_client=model_client,
+                    notifier=notifier,
+                    host_id=host_id,
+                    project_root=project_root,
+                )
+            )
+        except Exception:
+            log.exception(
+                "task %s firing for project=%s raised; continuing fanout",
+                task.id,
+                pid,
+            )
+    return results
 
 
 def _summarize(text: str, *, max_chars: int = 600) -> str:

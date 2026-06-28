@@ -137,8 +137,21 @@ class HubClient:
         r.raise_for_status()
         return r.json()
 
-    def list_projects(self) -> list[dict]:
-        r = self._client.get("/projects")
+    def list_projects(self, *, parent_id: str | None = None) -> list[dict]:
+        params: dict[str, str] = {}
+        if parent_id is not None:
+            params["parent_id"] = parent_id
+        r = self._client.get("/projects", params=params or None)
+        r.raise_for_status()
+        return r.json()
+
+    def list_children(self, parent_id: str) -> list[dict]:
+        return self.list_projects(parent_id=parent_id)
+
+    def list_related_projects(self, project_id: str) -> list[dict]:
+        """Self + parent + siblings, or self + children — used for
+        sibling-aware recall and the `where` tool."""
+        r = self._client.get(f"/projects/{project_id}/related")
         r.raise_for_status()
         return r.json()
 

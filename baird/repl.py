@@ -237,10 +237,19 @@ def run_repl(
                         "[dim]resume one with: baird code --session <full-id>[/dim]"
                     )
                 continue
+            if cmd == "project":
+                _handle_project_command(
+                    line=line,
+                    hub=hub,
+                    console=console,
+                    current_project_id=config.project_id,
+                    input_fn=input_fn if iterator is None else _iter_input_fn(iterator),
+                )
+                continue
             if cmd == "help":
                 console.print(
                     "[dim]/exit  /context  /reset  /cost  /model [id]  "
-                    "/sessions  /no-diff[/dim]"
+                    "/sessions  /no-diff  /project tree  /project new[/dim]"
                 )
                 continue
             console.print(f"[red]unknown command:[/red] /{cmd} (try /help)")
@@ -364,6 +373,85 @@ def _iter_input_fn(iterator: Iterable[str]) -> Callable[[str], str]:
             return ""
 
     return _read
+
+
+def _handle_project_command(
+    *,
+    line: str,
+    hub: HubClient,
+    console: Console,
+    current_project_id: str,
+    input_fn: Callable[[str], str],
+) -> None:
+    """`/project tree` and `/project new` — see feedback_baird_hub_only_ux.
+
+    `/project new` prompts conversationally for missing fields so the user
+    doesn't need to remember flag names. Hub-only: everything happens through
+    the existing memory client.
+    """
+    parts = line.split()
+    sub = parts[1].lower() if len(parts) >= 2 else "help"
+
+    if sub == "tree":
+        rows = hub.list_projects()
+        if not rows:
+            console.print("[dim]no projects[/dim]")
+            return
+        by_id = {r["id"]: r for r in rows}
+        parents: dict[str | None, list[dict]] = {}
+        for r in rows:
+            pid = (r.get("config") or {}).get("parent_id")
+            if pid is not None and pid not in by_id:
+                pid = None
+            parents.setdefault(pid, []).append(r)
+        for top in parents.get(None, []):
+            marker = " [green]*[/green]" if top["id"] == current_project_id else "  "
+            console.print(f"{marker}[bold]{top['id']}[/bold]  {top['name']}")
+            for child in parents.get(top["id"], []):
+                cmarker = " [green]*[/green]" if child["id"] == current_project_id else "  "
+                console.print(f"  {cmarker}└─ {child['id']}  {child['name']}")
+        return
+
+    if sub == "new":
+        # /project new <id> [--parent <id>] — anything missing is prompted.
+        pid: str | None = parts[2] if len(parts) >= 3 and not parts[2].startswith("--") else None
+        parent_id: str | None = None
+        # Crude --parent X parse — order-agnostic.
+        for i, tok in enumerate(parts):
+            if tok == "--parent" and i + 1 < len(parts):
+                parent_id = parts[i + 1]
+        if pid is None:
+            pid = input_fn("project id: ").strip() or None
+        if pid is None:
+            console.print("[red]cancelled — id required[/red]")
+            return
+        name = input_fn(f"name [{pid}]: ").strip() or pid
+        if parent_id is None:
+            ans = input_fn("parent id (blank for none): ").strip()
+            parent_id = ans or None
+        if parent_id is not None:
+            try:
+                parent_row = hub.get_project(parent_id)
+            except Exception as e:
+                console.print(f"[red]parent {parent_id!r} not found:[/red] {e}")
+                return
+            if (parent_row.get("config") or {}).get("parent_id"):
+                console.print(
+                    f"[red]{parent_id!r} is itself a child — one-level hierarchy only[/red]"
+                )
+                return
+        hub.upsert_project(
+            id=pid,
+            name=name,
+            github=None,
+            context=f"Project {name}.",
+            config={"parent_id": parent_id} if parent_id else {},
+        )
+        rel = f" under [cyan]{parent_id}[/cyan]" if parent_id else ""
+        console.print(f"[green]created[/green] {pid}{rel} on hub")
+        return
+
+    console.print("[dim]usage: /project tree  |  /project new [<id>] [--parent <id>][/dim]")
 
 
 def _handle_diff_blocks(

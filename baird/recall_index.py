@@ -176,10 +176,12 @@ def search(
     query: str,
     k: int = 10,
     project_id: str | None = None,
+    project_ids: list[str] | None = None,
     sources: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Vector top-k. Returns rows as dicts (compatible with /recall's existing
-    SQL hits)."""
+    SQL hits). Pass `project_ids` instead of `project_id` to search across a
+    set (e.g. siblings under a shared parent)."""
     if lazy is None:
         return []
 
@@ -190,7 +192,10 @@ def search(
         return []
     try:
         s = lazy.table.search(qvec).metric("cosine")
-        if project_id:
+        if project_ids:
+            quoted = ",".join(f"'{pid}'" for pid in project_ids)
+            s = s.where(f"project_id IN ({quoted})", prefilter=True)
+        elif project_id:
             s = s.where(f"project_id = '{project_id}'", prefilter=True)
         if sources:
             quoted = ",".join(f"'{src}'" for src in sources)

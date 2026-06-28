@@ -60,6 +60,10 @@ class ProjectYaml(BaseModel):
     name: str
     github: str | None = None
     context: str | None = None
+    # One level of nesting only: a project is either a parent OR a child, not
+    # both. `data_aliases` and `rules` do not inherit; `context` + active
+    # `goals` do. Enforced via SubprojectError in `validate_hierarchy`.
+    parent_id: str | None = None
     checkout_hosts: list[CheckoutHost] = Field(default_factory=list)
     goals: list[Goal] = Field(default_factory=list)
     state: dict[str, Any] = Field(default_factory=dict)
@@ -81,12 +85,41 @@ def save_project_yaml(model: ProjectYaml, path: Path) -> None:
         yaml.safe_dump(model.model_dump(mode="json"), f, sort_keys=False)
 
 
-def project_yaml_template(project_id: str, name: str, github: str | None = None) -> ProjectYaml:
+class SubprojectError(ValueError):
+    """Raised when a project hierarchy would violate the one-level rule
+    (a parent cannot have its own parent; cycles)."""
+
+
+def validate_hierarchy(child: ProjectYaml, parent: ProjectYaml) -> None:
+    """Enforce: child.parent_id == parent.id, parent has no parent of its
+    own (one level), no self-parenting."""
+    if child.parent_id is None:
+        return
+    if child.parent_id != parent.id:
+        raise SubprojectError(
+            f"child {child.id}.parent_id={child.parent_id!r} != parent.id={parent.id!r}"
+        )
+    if child.id == parent.id:
+        raise SubprojectError(f"project {child.id} cannot be its own parent")
+    if parent.parent_id is not None:
+        raise SubprojectError(
+            f"parent {parent.id} already has parent_id={parent.parent_id!r} "
+            "— hierarchy is one level only"
+        )
+
+
+def project_yaml_template(
+    project_id: str,
+    name: str,
+    github: str | None = None,
+    parent_id: str | None = None,
+) -> ProjectYaml:
     """Starter template for `baird project init`."""
     return ProjectYaml(
         id=project_id,
         name=name,
         github=github,
+        parent_id=parent_id,
         context=f"Project {name}. Write a short paragraph here describing what this is and why.",
         goals=[],
         state={},

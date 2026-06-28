@@ -242,9 +242,15 @@ def register_routes(app: FastAPI) -> None:
         return _project_out(row)
 
     @app.get("/projects", response_model=list[ProjectOut])
-    def list_projects(s: Session = Depends(get_memory)) -> list:
+    def list_projects(
+        parent_id: str | None = None,
+        s: Session = Depends(get_memory),
+    ) -> list:
         rows = s.scalars(select(Project).order_by(Project.created_at)).all()
-        return [_project_out(r) for r in rows]
+        out = [_project_out(r) for r in rows]
+        if parent_id is not None:
+            out = [p for p in out if (p.config or {}).get("parent_id") == parent_id]
+        return out
 
     @app.get("/projects/{project_id}", response_model=ProjectOut)
     def get_project(project_id: str, s: Session = Depends(get_memory)) -> ProjectOut:
@@ -252,6 +258,42 @@ def register_routes(app: FastAPI) -> None:
         if row is None:
             raise HTTPException(404, "project not found")
         return _project_out(row)
+
+    @app.get("/projects/{project_id}/related", response_model=list[ProjectOut])
+    def list_related_projects(
+        project_id: str, s: Session = Depends(get_memory)
+    ) -> list:
+        """Self + parent + siblings (for a child), or self + children (for a
+        parent). Used by sibling-aware recall and the `where` tool."""
+        row = s.get(Project, project_id)
+        if row is None:
+            raise HTTPException(404, "project not found")
+        all_rows = s.scalars(select(Project)).all()
+        cfg = row.config or {}
+        parent_id = cfg.get("parent_id")
+        out: list[Project] = [row]
+        if parent_id:
+            parent = s.get(Project, parent_id)
+            if parent is not None:
+                out.append(parent)
+            for r in all_rows:
+                if r.id == row.id:
+                    continue
+                if (r.config or {}).get("parent_id") == parent_id:
+                    out.append(r)
+        else:
+            for r in all_rows:
+                if (r.config or {}).get("parent_id") == row.id:
+                    out.append(r)
+        # Dedup preserving order.
+        seen: set[str] = set()
+        deduped: list[Project] = []
+        for r in out:
+            if r.id in seen:
+                continue
+            seen.add(r.id)
+            deduped.append(r)
+        return [_project_out(r) for r in deduped]
 
     # ---- Decisions ----
 

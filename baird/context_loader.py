@@ -44,6 +44,19 @@ DEFAULT_TOKEN_BUDGET = 6000
 
 
 @dataclass
+class ParentSummary:
+    """Subset of a parent project surfaced into a child's context block.
+
+    Only `context` paragraph + active goals are inherited; data_aliases and
+    rules stay scoped to each child (per the subproject-hierarchy design)."""
+
+    id: str
+    name: str
+    context: str | None
+    active_goals: list[str] = field(default_factory=list)
+
+
+@dataclass
 class RepoContext:
     project: ProjectYaml
     project_root: Path
@@ -56,6 +69,7 @@ class RepoContext:
     action_summaries: list[dict] = field(default_factory=list)
     rules_summary: list[str] = field(default_factory=list)
     host_id: str | None = None
+    parent: ParentSummary | None = None
 
 
 # ---- Gather helpers ----------------------------------------------------
@@ -172,6 +186,7 @@ def load_repo_context(
 
     decisions: list[dict] = []
     summaries: list[dict] = []
+    parent: ParentSummary | None = None
     if hub is not None:
         try:
             decisions = hub.list_decisions(project.id, limit=n_decisions)
@@ -182,6 +197,11 @@ def load_repo_context(
             summaries = [a for a in actions if a.get("summary")][:n_action_summaries]
         except Exception:
             summaries = []
+        if project.parent_id:
+            try:
+                parent = _fetch_parent_summary(hub, project.parent_id)
+            except Exception:
+                parent = None
 
     return RepoContext(
         project=project,
@@ -195,6 +215,20 @@ def load_repo_context(
         action_summaries=summaries,
         rules_summary=_rules_summary(project),
         host_id=host_id or os.uname().nodename,
+        parent=parent,
+    )
+
+
+def _fetch_parent_summary(hub: HubClient, parent_id: str) -> ParentSummary | None:
+    row = hub.get_project(parent_id)
+    cfg = row.get("config") or {}
+    goals = cfg.get("goals") or []
+    active = [g["text"] for g in goals if g.get("status", "active") == "active"]
+    return ParentSummary(
+        id=row["id"],
+        name=row.get("name") or row["id"],
+        context=row.get("context"),
+        active_goals=active,
     )
 
 
@@ -224,6 +258,15 @@ def render_context(ctx: RepoContext, *, token_budget: int = DEFAULT_TOKEN_BUDGET
             ]),
         )
     )
+
+    if ctx.parent is not None:
+        plines = [f"## Parent ({ctx.parent.name}) — inherited", ""]
+        plines.append(ctx.parent.context or "(no parent context paragraph)")
+        if ctx.parent.active_goals:
+            plines.append("")
+            plines.append("Active parent goals:")
+            plines.extend(f"- {g}" for g in ctx.parent.active_goals)
+        sections.append(("parent", "\n".join(plines)))
 
     sections.append(("context", f"## Context\n\n{ctx.project.context or '(no context paragraph)'}"))
 
