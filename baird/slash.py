@@ -843,11 +843,51 @@ def cmd_project_siblings(parts: list[str], ctx: SlashContext) -> SlashResult:
     return SlashResult(handled=True, output="\n".join(lines))
 
 
+# ---- /project rename -------------------------------------------------
+
+
+def cmd_project_rename(parts: list[str], ctx: SlashContext) -> SlashResult:
+    """Rename a project's display name. Issue #3.
+
+    Inline shape: `/project rename <id> <new name with spaces>`. The id
+    is the first token; everything after it is treated as the new name
+    (joined with a single space) so the user doesn't have to quote names
+    that contain spaces. Empty form (`/project rename`) prompts for both.
+    """
+    # We do NOT call parse_inline_args here — names are free text that can
+    # legitimately contain `=`, double dashes (e.g. "scRNA -- spatial"), or
+    # `key=value` lookalikes. The id is always pos[0]; the name is the rest.
+    known: dict[str, str] = {}
+    if parts:
+        known["id"] = parts[0]
+    if len(parts) > 1:
+        known["name"] = " ".join(parts[1:])
+    fields = [
+        FormField("id", "project id to rename", required=True),
+        FormField("name", "new human-readable name", required=True),
+    ]
+    vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
+    new_name = vals["name"].strip()
+    if not new_name:
+        return SlashResult(handled=True, ok=False, output="new name cannot be empty")
+    try:
+        row = ctx.hub.rename_project(vals["id"], new_name)
+    except Exception as e:
+        return SlashResult(
+            handled=True, ok=False, output=f"failed to rename project: {e}"
+        )
+    return SlashResult(
+        handled=True,
+        output=f"renamed {row['id']} → {row.get('name', new_name)!r}",
+    )
+
+
 # ---- Registry --------------------------------------------------------
 
 
 _COMMANDS: dict[str, HandlerFn] = {
     "project new": cmd_project_new,
+    "project rename": cmd_project_rename,
     "project locations": cmd_project_locations,
     "project add-location": cmd_project_add_location,
     "project enrich": cmd_project_enrich,

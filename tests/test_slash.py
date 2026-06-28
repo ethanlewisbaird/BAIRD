@@ -471,6 +471,46 @@ def test_unknown_command_returns_none() -> None:
     assert try_dispatch("nonsense", ctx) is None
 
 
+# ---- /project rename (issue #3) -----------------------------------------
+
+
+def test_project_rename_inline() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.rename_project.return_value = {"id": "scentinel-spatial", "name": "Spatial"}
+    r = try_dispatch("project rename scentinel-spatial Spatial", ctx)
+    assert r.handled and r.ok, r.output
+    hub.rename_project.assert_called_once_with("scentinel-spatial", "Spatial")
+    assert "Spatial" in r.output
+
+
+def test_project_rename_accepts_spaces_in_name() -> None:
+    """`/project rename <id> <name with spaces>` — everything after the id
+    is the name. No quoting required (issue #3)."""
+    ctx, hub, _ = _ctx(answers=[])
+    hub.rename_project.return_value = {
+        "id": "p", "name": "Spatial Transcriptomics"
+    }
+    r = try_dispatch("project rename p Spatial Transcriptomics", ctx)
+    assert r.handled and r.ok, r.output
+    hub.rename_project.assert_called_once_with("p", "Spatial Transcriptomics")
+
+
+def test_project_rename_form_prompts_for_missing() -> None:
+    ctx, hub, _ = _ctx(answers=["p", "New Name"])
+    hub.rename_project.return_value = {"id": "p", "name": "New Name"}
+    r = try_dispatch("project rename", ctx)
+    assert r.handled and r.ok
+    hub.rename_project.assert_called_once_with("p", "New Name")
+
+
+def test_project_rename_propagates_hub_error() -> None:
+    ctx, hub, _ = _ctx(answers=[])
+    hub.rename_project.side_effect = RuntimeError("404 not found")
+    r = try_dispatch("project rename missing X", ctx)
+    assert r.handled and not r.ok
+    assert "failed to rename" in r.output
+
+
 # ---- Issue #2 guard: flag-looking values are rejected -------------------
 
 
