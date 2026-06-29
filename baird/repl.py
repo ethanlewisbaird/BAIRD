@@ -475,7 +475,7 @@ def run_repl(
     return stats
 
 
-MAX_AGENT_ROUNDS = 6
+MAX_AGENT_ROUNDS = 12
 
 
 def _one_turn(
@@ -725,15 +725,18 @@ def _format_args(args: object) -> str:
     return ", ".join(parts)
 
 
+TOOL_RESULT_MAX_CHARS = 8000
+
+
 def _format_tool_result(result: object) -> str:
     if result is None:
         return "ok"
     if isinstance(result, (str, int, float, bool)):
-        return str(result)
+        return str(result)[:TOOL_RESULT_MAX_CHARS]
     try:
-        return _json.dumps(result, default=str)[:4000]
+        return _json.dumps(result, default=str)[:TOOL_RESULT_MAX_CHARS]
     except Exception:
-        return str(result)[:4000]
+        return str(result)[:TOOL_RESULT_MAX_CHARS]
 
 
 def _switch_project(target_id, hub, config, host_id, console):
