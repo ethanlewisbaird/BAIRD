@@ -56,7 +56,8 @@ def test_install_tunnel_writes_files_and_enables(
     assert "ExecStart=" in unit
     assert "%i" in unit
     env = (tmp_path / "bcfg" / "tunnel-workstation.env").read_text()
-    assert env.strip() == "LOCAL_FWD_PORT=8766"
+    assert "LOCAL_FWD_PORT=8766" in env
+    assert "SATELLITE_PORT=8765" in env
     cmds = [c[0][:3] for c in runner.calls]
     assert ["systemctl", "--user", "daemon-reload"] in cmds
     assert any("enable" in c for c in cmds[0] + cmds[-1])

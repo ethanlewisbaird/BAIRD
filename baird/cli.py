@@ -826,6 +826,94 @@ def restart(
     console.print(f"[green]restarted: {', '.join(msg)}[/green]")
 
 
+@app.command("update")
+def update(
+    sat_only: bool = typer.Option(
+        False,
+        "--sat-only",
+        help="Only update satellites; skip local git pull and restart.",
+    ),
+    skip_satellites: bool = typer.Option(
+        False,
+        "--skip-satellites",
+        help="Only update the local hub; skip satellite updates.",
+    ),
+) -> None:
+    """Pull latest code from GitHub on the hub and all enrolled satellites,
+    then restart services to pick up changes."""
+    import subprocess as _subprocess
+    import time as _time
+    from pathlib import Path as _Path
+
+    from .satellite import load_registry
+    from .supervisor import (
+        ensure_daemon_running,
+        ensure_hub_running,
+        is_hub_running,
+        stop_daemon,
+        stop_hub,
+    )
+
+    baird_dir = _Path(__file__).resolve().parent.parent
+
+    # 1. Pull latest on the hub
+    if not sat_only:
+        console.print("[cyan]updating hub code…[/cyan]")
+        r = _subprocess.run(
+            ["git", "pull"],
+            cwd=str(baird_dir),
+            capture_output=True, text=True, timeout=60,
+        )
+        if r.returncode != 0:
+            console.print(f"[red]git pull failed on hub[/red]\n{r.stderr}")
+            raise typer.Exit(1)
+        console.print("[green]hub code updated[/green]")
+
+    # 2. Update each satellite
+    if not skip_satellites:
+        reg = load_registry()
+        if not reg:
+            console.print("[yellow]no satellites enrolled[/yellow]")
+        else:
+            for host_id, entry in reg.items():
+                ssh_host = entry.get("ssh_host", host_id)
+                remote_dir = entry.get("remote_baird_dir", "$HOME/code/BAIRD")
+                console.print(f"[cyan]updating {host_id} ({ssh_host})…[/cyan]")
+                script = (
+                    f"cd {remote_dir} && git pull && "
+                    "if systemctl --user list-units --all 2>/dev/null "
+                    "| grep -q baird-daemon; then "
+                    "systemctl --user restart baird-daemon; "
+                    "else "
+                    "pkill -f 'baird.cli daemon' 2>/dev/null; "
+                    "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
+                    "uv run python -m baird.cli daemon "
+                    ">/tmp/baird-daemon.log 2>&1 & "
+                    "fi"
+                )
+                r = _subprocess.run(
+                    ["ssh", ssh_host, script],
+                    capture_output=True, text=True, timeout=120,
+                )
+                if r.returncode != 0:
+                    console.print(f"[red]{host_id} update failed[/red]\n{r.stderr[:500]}")
+                else:
+                    console.print(f"[green]{host_id} updated[/green]")
+
+    # 3. Restart local hub (+ daemon) with new code
+    if not sat_only:
+        console.print("[cyan]restarting local services…[/cyan]")
+        stop_daemon()
+        stop_hub()
+        for _ in range(20):
+            if not is_hub_running():
+                break
+            _time.sleep(0.1)
+        ensure_hub_running(quiet=True)
+        ensure_daemon_running(quiet=True)
+        console.print("[green]hub + daemon restarted[/green]")
+
+
 # ----- diff -----
 
 
