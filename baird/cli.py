@@ -897,7 +897,10 @@ def update(
                 console.print(f"[cyan]restarting daemon on {host_id}…[/cyan]")
                 uv_bin = "\"$HOME/.local/bin/uv\""
                 restart_script = (
-                    "pkill -f 'baird.*daemon' 2>/dev/null || true; "
+                    "ps aux | grep 'python.*baird.*daemon' | grep -v grep "
+                    "| awk '{print $2}' | xargs -r kill 2>/dev/null || true; "
+                    "ps aux | grep 'uv.*baird.*daemon' | grep -v grep "
+                    "| awk '{print $2}' | xargs -r kill 2>/dev/null || true; "
                     "sleep 0.5; "
                     "systemctl --user stop baird-daemon.service 2>/dev/null || true; "
                     "systemctl --user reset-failed baird-daemon.service 2>/dev/null || true; "
