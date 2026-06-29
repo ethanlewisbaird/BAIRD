@@ -100,7 +100,7 @@ ExecStart=/usr/bin/ssh -N \\
     -o StreamLocalBindUnlink=yes \\
     -o BatchMode=yes \\
     -R 8000:localhost:8000 \\
-    -L ${LOCAL_FWD_PORT}:localhost:${SATELLITE_PORT:-8765} \\
+    -L ${LOCAL_FWD_PORT}:localhost:${SATELLITE_PORT} \\
     %i
 Restart=always
 RestartSec=10
@@ -114,6 +114,7 @@ WantedBy=default.target
 class TunnelSpec:
     ssh_host: str
     local_fwd_port: int
+    satellite_port: int = 8765
     systemd_user_dir: Path = field(default_factory=lambda: Path.home() / ".config/systemd/user")
     baird_config_dir: Path = field(default_factory=lambda: Path.home() / ".config/baird")
 
@@ -127,7 +128,10 @@ def install_tunnel(spec: TunnelSpec, *, run: CommandRunner = _default_runner) ->
         unit_file.write_text(TUNNEL_UNIT)
 
     env_file = spec.baird_config_dir / f"tunnel-{spec.ssh_host}.env"
-    env_file.write_text(f"LOCAL_FWD_PORT={spec.local_fwd_port}\n")
+    env_file.write_text(
+        f"LOCAL_FWD_PORT={spec.local_fwd_port}\n"
+        f"SATELLITE_PORT={spec.satellite_port}\n"
+    )
 
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "enable", "--now", f"baird-tunnel@{spec.ssh_host}"])
