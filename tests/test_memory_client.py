@@ -77,11 +77,11 @@ def test_sessions(hub: _TestClientHub) -> None:
     sess = hub.new_session(mode="chat")
     hub.append_message(sess["id"], role="user", content="hello")
     hub.append_message(
-        sess["id"], role="assistant", content="hi", tool_calls={"name": "x"}
+        sess["id"], role="assistant", content="hi", tool_calls=[{"name": "x"}]
     )
     msgs = hub.get_messages(sess["id"])
     assert [m["role"] for m in msgs] == ["user", "assistant"]
-    assert msgs[1]["tool_calls"] == {"name": "x"}
+    assert msgs[1]["tool_calls"] == [{"name": "x"}]
 
 
 def test_notifications(hub: _TestClientHub) -> None:

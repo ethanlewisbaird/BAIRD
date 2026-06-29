@@ -38,7 +38,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from .context_loader import RepoContext, render_context
+from .context_loader import RepoContext
 from .diff_apply import DiffApplyError, apply_diff_to_repo
 from .memory_client import HubClient
 from .model import ModelError, OpenRouterClient, top_openrouter_models
@@ -179,8 +179,6 @@ def run_tui_repl(
 ) -> ReplStats:
     """TUI variant of `run_repl`. Same semantics, persistent layout."""
     stats = ReplStats()
-    rendered = render_context(repo_ctx)
-    system = _system_prompt(rendered)
     diff_loop_active = config.diff_loop_enabled
     model_picker_cache: list[str] = []
 
@@ -197,6 +195,10 @@ def run_tui_repl(
             task_id=f"repl-{config.project_id}",
             project_id=config.project_id,
         )
+
+    from .context_loader import build_epoch_context, reconcile_context
+    epoch = build_epoch_context(repo_ctx)
+    system = _system_prompt(epoch.baseline)
 
     iterator: Iterable[str] | None = iter(inputs) if inputs is not None else None
 
@@ -408,6 +410,36 @@ def run_tui_repl(
                 nonlocal streamed_any
                 streamed_any = True
                 console.out(delta, end="", highlight=False)
+
+            # Reconcile context sources that may have changed since last turn.
+            # Injects any detected changes as system messages in the session so
+            # they appear in the model's context before the user's message.
+            if config.project_root is not None:
+                try:
+                    from .context_loader import (
+                        _git_log_oneline, _git_status, _build_tree,
+                        GIT_LOG_SOURCE, GIT_STATUS_SOURCE, TREE_SOURCE,
+                    )
+                    fresh = RepoContext(
+                        project=repo_ctx.project, project_root=config.project_root,
+                        branch=repo_ctx.branch,
+                        git_log_lines=_git_log_oneline(config.project_root, n=10),
+                        git_status=_git_status(config.project_root),
+                        tree=_build_tree(config.project_root),
+                        relevant_files=repo_ctx.relevant_files,
+                        decisions=repo_ctx.decisions,
+                        action_summaries=repo_ctx.action_summaries,
+                        rules_summary=repo_ctx.rules_summary,
+                        host_id=repo_ctx.host_id,
+                        locations=repo_ctx.locations,
+                        parent=repo_ctx.parent,
+                    )
+                    updates = reconcile_context(epoch, fresh)
+                    for key, content in updates:
+                        msg_text = f"[context update: {key}]\n{content}"
+                        hub.append_message(session["id"], role="system", content=msg_text)
+                except Exception:
+                    pass
 
             try:
                 completion = _one_turn(

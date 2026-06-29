@@ -172,6 +172,7 @@ class Message(MemoryBase):
     role: Mapped[str] = mapped_column(String)  # user | assistant | system | tool
     content: Mapped[str] = mapped_column(Text)
     tool_calls: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    tool_call_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_utcnow)
 
 

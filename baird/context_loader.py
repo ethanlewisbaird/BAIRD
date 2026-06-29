@@ -1,33 +1,359 @@
 """Repo context loader — Phase 3 design, sub-decision #2.
 
-Builds the per-turn context block for `baird code`:
+Builds the per-turn context block for `baird code`.
 
-- Project header (id, name, github, branch, host, cwd)
-- Project memory (context paragraph + last N decisions + applicable rules + goals)
-- `tree -L 3` of the project root, with subtrees >50 entries auto-collapsed
-- Last 10 git commits (oneline)
-- `git status --porcelain`
-- Recent tier-2 action summaries for this project (pulled from the hub)
-- A list of "relevant files" — files the caller explicitly named, plus the
-  always-include set (`.baird/project.yaml`, `environment.yml`, `README.md`,
-  `CLAUDE.md` if present)
+Each context source is tracked independently with a stable key and a
+lightweight fingerprint for change detection. At session start, all sources
+are loaded into an immutable baseline. On each subsequent turn, sources are
+reconciled — unchanged sources stay in the baseline, changed sources emit a
+mid-conversation update message. This avoids wasting tokens on re-rendering
+content the model has already seen.
 
-Token budget is approximate — we count words ~ 1.3 × tokens — and prefer to
-drop deepest tree subdirs first, then commits, then summaries.
-
-Symbol-map (ctags) is deferred; LSP integration deferred.
+Sources:
+- header (project metadata)
+- context (project context paragraph + parent context)
+- locations (remote locations)
+- goals (project goals, including parent)
+- decisions (recent hub decisions)
+- rules (active rules)
+- summaries (recent action summaries)
+- git_log (last commits)
+- git_status (working tree)
+- tree (directory tree)
+- files (relevant file contents)
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Protocol
 
 from .memory_client import HubClient
 from .project_yaml import Location, ProjectYaml, effective_locations, load_project_yaml
+
+
+class ContextSource(Protocol):
+    """A single contextual fact source with stable key and change detection.
+    
+    Each source produces:
+    - `key`: stable identifier (e.g. "git_log", "tree")
+    - `description`: human-readable label
+    - `load()`: full rendered content
+    - `fingerprint()`: lightweight comparison value (e.g. hash, or mtime)
+    
+    When the fingerprint changes between turns, a mid-conversation update
+    message is emitted for just that source instead of regenerating the
+    entire context block.
+    """
+    key: str
+    description: str
+
+    def load(self, ctx: RepoContext) -> str: ...
+    def fingerprint(self, ctx: RepoContext) -> str: ...
+
+
+@dataclass
+class EpochContext:
+    """Immutable baseline context plus change-detection state.
+    
+    Created at session start from all registered sources. On each turn,
+    `reconcile()` compares current fingerprints against the stored ones
+    and returns updates for any changed sources.
+    """
+    baseline: str
+    fingerprints: dict[str, str]
+
+    def reconcile(self, sources: list[tuple[str, ContextSource]], ctx: RepoContext) -> list[tuple[str, str]]:
+        """Return [(key, rendered_content), ...] for sources whose fingerprint
+        changed since the epoch was created (or last reconciled)."""
+        updates: list[tuple[str, str]] = []
+        for key, source in sources:
+            new_fp = source.fingerprint(ctx)
+            old_fp = self.fingerprints.get(key)
+            if new_fp != old_fp:
+                self.fingerprints[key] = new_fp
+                updates.append((key, source.load(ctx)))
+        return updates
+
+
+# ---- Built-in context sources -------------------------------------------
+
+
+class _HeaderSource:
+    key = "header"
+    description = "Project metadata header"
+
+    def fingerprint(self, ctx: RepoContext) -> str:
+        return f"{ctx.project.id}|{ctx.project.name}|{ctx.project.github or ''}|{ctx.branch or ''}|{project_host_for_display(ctx)}"
+
+    def load(self, ctx: RepoContext) -> str:
+        return "\n".join([
+            f"# Project: {ctx.project.name} ({ctx.project.id})",
+            f"Host: {project_host_for_display(ctx)}",
+            f"Root: {ctx.project_root or '(no local checkout)'}",
+            f"Branch: {ctx.branch or '(detached)'}",
+            f"GitHub: {ctx.project.github or '(none)'}",
+        ])
+
+
+HEADER_SOURCE = _HeaderSource()
+
+
+class _ContextSource:
+    key = "context"
+    description = "Project context paragraph + parent context"
+
+    def fingerprint(self, ctx: RepoContext) -> str:
+        return hashlib.md5(
+            str(ctx.project.context or "").encode()
+            + str(ctx.parent.context if ctx.parent else "").encode()
+        ).hexdigest()
+
+    def load(self, ctx: RepoContext) -> str:
+        parts = [f"## Context\n\n{ctx.project.context or '(no context paragraph)'}"]
+        if ctx.parent is not None:
+            parent_lines: list[str] = [
+                f"## Parent ({ctx.parent.name})",
+                "",
+                "*(inherited from parent — context + active goals only; "
+                "rules and data_aliases stay scoped per project)*",
+                "",
+                ctx.parent.context or "(no parent context paragraph)",
+            ]
+            if ctx.parent.active_goals:
+                parent_lines.append("")
+                parent_lines.append("**Active goals (parent):**")
+                parent_lines.extend(f"- {g}" for g in ctx.parent.active_goals)
+            if ctx.parent.sibling_ids:
+                parent_lines.append("")
+                sibs = ", ".join(f"`{sid}` ({sname})" for sid, sname in ctx.parent.sibling_ids)
+                parent_lines.append(f"**Sibling projects:** {sibs}")
+            parts.append("\n".join(parent_lines))
+        return "\n\n".join(parts)
+
+
+CONTEXT_SOURCE = _ContextSource()
+
+
+class _LocationsSource:
+    key = "locations"
+    description = "Remote locations for the project"
+
+    def fingerprint(self, ctx: RepoContext) -> str:
+        if not ctx.locations:
+            return ""
+        return ";".join(f"{l.host}:{l.path}" for l in ctx.locations)
+
+    def load(self, ctx: RepoContext) -> str:
+        if not ctx.locations:
+            return ""
+        loc_lines = [
+            f"- `{loc.host}:{loc.path}`" + (f" — {loc.role}" if loc.role else "")
+            for loc in ctx.locations
+        ]
+        return "## Locations\n\nProject spans these (host, path) pairs. Remote tool calls "\
+               "(read_remote/write_remote/run_on/...) need a `host` argument matching one "\
+               "of these host_ids:\n\n" + "\n".join(loc_lines)
+
+
+LOCATIONS_SOURCE = _LocationsSource()
+
+
+class _GoalsSource:
+    key = "goals"
+    description = "Project goals"
+
+    def fingerprint(self, ctx: RepoContext) -> str:
+        return ";".join(f"{g.text}:{g.status}" for g in ctx.project.goals)
+
+    def load(self, ctx: RepoContext) -> str:
+        goal_lines = [f"- [{g.status}] {g.text}" for g in ctx.project.goals]
+        return "## Goals\n\n" + "\n".join(goal_lines)
+
+
+GOALS_SOURCE = _GoalsSource()
+
+
+class _DecisionsSource:
+    key = "decisions"
+    description = "Recent hub decisions"
+
+    def fingerprint(self, ctx: RepoContext) -> str:
+        if not ctx.decisions:
+            return ""
+        return hashlib.md5(str(ctx.decisions).encode()).hexdigest()
+
+    def load(self, ctx: RepoContext) -> str:
+        if not ctx.decisions:
+            return ""
+        d_lines = [
+            f"- [{d['created_at'][:10]}] ({d['author']}) {d['text']}"
+            for d in ctx.decisions
+        ]
+        return "## Recent decisions\n\n" + "\n".join(d_lines)
+
+
+DECISIONS_SOURCE = _DecisionsSource()
+
+
+class _RulesSource:
+    key = "rules"
+    description = "Active rules"
+
+    def fingerprint(self, ctx: RepoContext) -> str:
+        return ";".join(ctx.rules_summary)
+
+    def load(self, ctx: RepoContext) -> str:
+        if not ctx.rules_summary:
+            return ""
+        return "## Active rules\n\n- " + "\n- ".join(ctx.rules_summary)
+
+
+RULES_SOURCE = _RulesSource()
+
+
+class _SummariesSource:
+    key = "summaries"
+    description = "Recent action summaries"
+
+    def fingerprint(self, ctx: RepoContext) -> str:
+        if not ctx.action_summaries:
+            return ""
+        return hashlib.md5(str(ctx.action_summaries).encode()).hexdigest()
+
+    def load(self, ctx: RepoContext) -> str:
+        if not ctx.action_summaries:
+            return ""
+        a_lines = [
+            f"- ({a['tool_name'] or 'cmd'}) {a['summary']}"
+            for a in ctx.action_summaries
+        ]
+        return "## Recent action summaries\n\n" + "\n".join(a_lines)
+
+
+SUMMARIES_SOURCE = _SummariesSource()
+
+
+class _GitLogSource:
+    key = "git_log"
+    description = "Last commits"
+
+    def fingerprint(self, ctx: RepoContext) -> str:
+        return hashlib.md5("".join(ctx.git_log_lines).encode()).hexdigest()
+
+    def load(self, ctx: RepoContext) -> str:
+        return "## Last commits\n\n```\n" + "\n".join(ctx.git_log_lines) + "\n```"
+
+
+GIT_LOG_SOURCE = _GitLogSource()
+
+
+class _GitStatusSource:
+    key = "git_status"
+    description = "Working tree status"
+
+    def fingerprint(self, ctx: RepoContext) -> str:
+        return hashlib.md5(ctx.git_status.encode()).hexdigest()
+
+    def load(self, ctx: RepoContext) -> str:
+        return "## Working tree status\n\n```\n" + (ctx.git_status or "(clean)") + "\n```"
+
+
+GIT_STATUS_SOURCE = _GitStatusSource()
+
+
+class _TreeSource:
+    key = "tree"
+    description = "Directory tree"
+
+    def fingerprint(self, ctx: RepoContext) -> str:
+        return hashlib.md5(ctx.tree.encode()).hexdigest()
+
+    def load(self, ctx: RepoContext) -> str:
+        return "## Tree\n\n```\n" + ctx.tree + "\n```"
+
+
+TREE_SOURCE = _TreeSource()
+
+
+class _FilesSource:
+    key = "files"
+    description = "Relevant file contents"
+
+    def fingerprint(self, ctx: RepoContext) -> str:
+        return hashlib.md5(str(sorted(ctx.relevant_files.items())).encode()).hexdigest()
+
+    def load(self, ctx: RepoContext) -> str:
+        if not ctx.relevant_files:
+            return ""
+        parts = ["## Relevant files\n"]
+        for path, content in ctx.relevant_files.items():
+            parts.append(f"### `{path}`\n\n```\n{content}\n```\n")
+        return "\n".join(parts)
+
+
+FILES_SOURCE = _FilesSource()
+
+
+# All context sources in render order (drop order applies to last N).
+CONTEXT_SOURCES: list[tuple[str, ContextSource]] = [
+    ("header", HEADER_SOURCE),
+    ("context", CONTEXT_SOURCE),
+    ("locations", LOCATIONS_SOURCE),
+    ("goals", GOALS_SOURCE),
+    ("decisions", DECISIONS_SOURCE),
+    ("rules", RULES_SOURCE),
+    ("summaries", SUMMARIES_SOURCE),
+    ("git_log", GIT_LOG_SOURCE),
+    ("git_status", GIT_STATUS_SOURCE),
+    ("tree", TREE_SOURCE),
+    ("files", FILES_SOURCE),
+]
+
+
+def build_epoch_context(ctx: RepoContext, *, token_budget: int = 6000) -> EpochContext:
+    """Build an immutable baseline EpochContext from a RepoContext.
+    
+    Renders all registered context sources, respecting the token budget.
+    Returns the baseline text plus fingerprints for change detection."""
+    fingerprints: dict[str, str] = {}
+    sections: list[tuple[str, str]] = []
+
+    for key, source in CONTEXT_SOURCES:
+        try:
+            content = source.load(ctx)
+        except Exception:
+            content = ""
+        if content:
+            sections.append((key, content))
+        fingerprints[key] = source.fingerprint(ctx)
+
+    # Budget: drop tree, then summaries, then git_log if over budget.
+    word_limit = int(token_budget * 0.75)
+    drop_order = ["tree", "summaries", "git_log"]
+    while True:
+        baseline = "\n\n".join(text for _, text in sections)
+        if len(baseline.split()) <= word_limit:
+            return EpochContext(baseline=baseline, fingerprints=fingerprints)
+        if not drop_order:
+            return EpochContext(baseline=baseline, fingerprints=fingerprints)
+        drop = drop_order.pop(0)
+        sections = [(k, v) for k, v in sections if k != drop]
+
+
+def reconcile_context(
+    epoch: EpochContext, ctx: RepoContext,
+) -> list[tuple[str, str]]:
+    """Check which context sources changed and return their updated content.
+    
+    Returns [(key, rendered_content), ...] for changed sources. Each update
+    should be injected as a mid-conversation system message so the model
+    sees only the delta."""
+    return epoch.reconcile(CONTEXT_SOURCES, ctx)
 
 
 ALWAYS_INCLUDE = [
@@ -353,102 +679,8 @@ def project_host_for_display(ctx: RepoContext) -> str:
 
 
 def render_context(ctx: RepoContext, *, token_budget: int = DEFAULT_TOKEN_BUDGET) -> str:
-    """Render a RepoContext as a markdown block. Drops sections in priority
-    order if the result would exceed `token_budget` (approx: 1 token ≈ 0.75 words).
-
-    The first version's "drop tree subdirs first" simplification is to drop the
-    tree entirely if needed — finer-grained collapse is a follow-up.
-    """
-    word_limit = int(token_budget * 0.75)
-
-    sections: list[tuple[str, str]] = []
-
-    sections.append(
-        (
-            "header",
-            "\n".join([
-                f"# Project: {ctx.project.name} ({ctx.project.id})",
-                f"Host: {project_host_for_display(ctx)}",
-                f"Root: {ctx.project_root or '(no local checkout)'}",
-                f"Branch: {ctx.branch or '(detached)'}",
-                f"GitHub: {ctx.project.github or '(none)'}",
-            ]),
-        )
-    )
-
-    sections.append(("context", f"## Context\n\n{ctx.project.context or '(no context paragraph)'}"))
-
-    if ctx.parent is not None:
-        # Inherited slice from the umbrella project. Scope is deliberate:
-        # context + active goals only — NOT data_aliases or rules.
-        parent_lines: list[str] = [
-            f"## Parent ({ctx.parent.name})",
-            "",
-            "*(inherited from parent — context + active goals only; "
-            "rules and data_aliases stay scoped per project)*",
-            "",
-            ctx.parent.context or "(no parent context paragraph)",
-        ]
-        if ctx.parent.active_goals:
-            parent_lines.append("")
-            parent_lines.append("**Active goals (parent):**")
-            parent_lines.extend(f"- {g}" for g in ctx.parent.active_goals)
-        if ctx.parent.sibling_ids:
-            parent_lines.append("")
-            sibs = ", ".join(f"`{sid}` ({sname})" for sid, sname in ctx.parent.sibling_ids)
-            parent_lines.append(f"**Sibling projects:** {sibs}")
-        sections.append(("parent", "\n".join(parent_lines)))
-
-    if ctx.locations:
-        loc_lines = [
-            f"- `{loc.host}:{loc.path}`" + (f" — {loc.role}" if loc.role else "")
-            for loc in ctx.locations
-        ]
-        sections.append((
-            "locations",
-            "## Locations\n\nProject spans these (host, path) pairs. Remote tool calls "
-            "(read_remote/write_remote/run_on/...) need a `host` argument matching one "
-            "of these host_ids:\n\n" + "\n".join(loc_lines),
-        ))
-
-    if ctx.project.goals:
-        goal_lines = [f"- [{g.status}] {g.text}" for g in ctx.project.goals]
-        sections.append(("goals", "## Goals\n\n" + "\n".join(goal_lines)))
-
-    if ctx.decisions:
-        d_lines = [
-            f"- [{d['created_at'][:10]}] ({d['author']}) {d['text']}"
-            for d in ctx.decisions
-        ]
-        sections.append(("decisions", "## Recent decisions\n\n" + "\n".join(d_lines)))
-
-    if ctx.rules_summary:
-        sections.append(("rules", "## Active rules\n\n- " + "\n- ".join(ctx.rules_summary)))
-
-    if ctx.action_summaries:
-        a_lines = [
-            f"- ({a['tool_name'] or 'cmd'}) {a['summary']}"
-            for a in ctx.action_summaries
-        ]
-        sections.append(("summaries", "## Recent action summaries\n\n" + "\n".join(a_lines)))
-
-    sections.append(("git_log", "## Last commits\n\n```\n" + "\n".join(ctx.git_log_lines) + "\n```"))
-    sections.append(("git_status", "## Working tree status\n\n```\n" + (ctx.git_status or "(clean)") + "\n```"))
-    sections.append(("tree", "## Tree\n\n```\n" + ctx.tree + "\n```"))
-
-    if ctx.relevant_files:
-        parts = ["## Relevant files\n"]
-        for path, content in ctx.relevant_files.items():
-            parts.append(f"### `{path}`\n\n```\n{content}\n```\n")
-        sections.append(("files", "\n".join(parts)))
-
-    # Budget: drop tree, then summaries, then git_log if over budget.
-    drop_order = ["tree", "summaries", "git_log"]
-    while True:
-        rendered = "\n\n".join(text for _, text in sections)
-        if len(rendered.split()) <= word_limit:
-            return rendered
-        if not drop_order:
-            return rendered  # nothing else to drop; return as-is
-        drop = drop_order.pop(0)
-        sections = [(k, v) for k, v in sections if k != drop]
+    """Render a RepoContext as a markdown block. Delegates to the epoch-based
+    context source system. Drops sections in priority order if the result
+    would exceed `token_budget` (approx: 1 token ≈ 0.75 words)."""
+    epoch = build_epoch_context(ctx, token_budget=token_budget)
+    return epoch.baseline

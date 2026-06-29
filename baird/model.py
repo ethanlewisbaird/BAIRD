@@ -201,11 +201,16 @@ class OpenRouterClient:
         max_tokens: int = 1024,
         temperature: float = 0.2,
         system: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | None = None,
         on_chunk: "Callable[[str], None] | None" = None,
     ) -> Completion:
         """Same as `complete`, but streams the response. Calls `on_chunk` for
         every content delta as it arrives. Returns the final Completion once
         the stream ends.
+
+        Supports `tools` — tool_call deltas are accumulated from the stream
+        and returned as structured `tool_calls` on the Completion.
 
         For a hub-proxy `transport=`, the transport receives the request and
         returns an iterator yielding raw SSE bytes (newline-terminated lines).
@@ -219,6 +224,9 @@ class OpenRouterClient:
             "temperature": temperature,
             "stream": True,
         }
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = tool_choice or "auto"
         chunks_iter = self._stream_post("/chat/completions", body)
         # If the transport doesn't actually stream (returns a dict), parse it
         # as a non-streaming response and call the callback once with the
@@ -230,6 +238,10 @@ class OpenRouterClient:
             return completion
         content_parts: list[str] = []
         usage: dict[str, Any] | None = None
+        # Accumulate tool_calls by index — each index can have id, name, args
+        # spread across multiple stream deltas.
+        tool_call_acc: dict[int, dict[str, Any]] = {}
+        _finish_reason: str | None = None
         try:
             for line_bytes in chunks_iter:
                 line = (
@@ -251,17 +263,53 @@ class OpenRouterClient:
                 if obj.get("usage"):
                     usage = obj["usage"]
                 for ch in obj.get("choices", []) or []:
-                    delta = (ch.get("delta") or {}).get("content")
-                    if delta:
-                        content_parts.append(delta)
+                    if ch.get("finish_reason"):
+                        _finish_reason = ch["finish_reason"]
+                    delta = ch.get("delta") or {}
+                    # Content delta
+                    d_content = delta.get("content")
+                    if d_content:
+                        content_parts.append(d_content)
                         if on_chunk is not None:
-                            on_chunk(delta)
+                            on_chunk(d_content)
+                    # Tool-call deltas
+                    for tc_delta in delta.get("tool_calls") or []:
+                        idx = tc_delta.get("index", 0)
+                        acc = tool_call_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
+                        if tc_delta.get("id"):
+                            acc["id"] = tc_delta["id"]
+                        if tc_delta.get("function"):
+                            fn = tc_delta["function"]
+                            if fn.get("name"):
+                                acc["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                acc["args"] += fn["arguments"]
         finally:
             pass
+        # Build tool_calls from accumulator
+        tool_calls_out: list[dict[str, Any]] | None = None
+        if tool_call_acc:
+            tool_calls_out = []
+            for idx in sorted(tool_call_acc):
+                acc = tool_call_acc[idx]
+                tc = {
+                    "id": acc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": acc["name"],
+                        "arguments": acc["args"],
+                    },
+                }
+                tool_calls_out.append(tc)
+                # Stream tool_calls to on_chunk as JSON so the TUI can see them
+                if on_chunk is not None:
+                    on_chunk(_json.dumps({"tool_calls": [tc]}))
         raw_like = {
             "choices": [{"message": {"content": "".join(content_parts)}}],
             "usage": usage or {},
         }
+        if tool_calls_out:
+            raw_like["choices"][0]["message"]["tool_calls"] = tool_calls_out
         return self._parse(model, raw_like)
 
     # --- internals -------------------------------------------------------

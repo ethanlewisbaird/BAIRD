@@ -33,7 +33,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 
-from .context_loader import RepoContext, render_context
+from .context_loader import RepoContext
 from .diff_apply import DiffApplyError, apply_diff_to_repo
 from .memory_client import HubClient
 from .model import Completion, ModelError, OpenRouterClient
@@ -203,9 +203,6 @@ def run_repl(
     history) instead of the project's default `repl-<project_id>` session.
     """
     stats = ReplStats()
-    rendered = render_context(repo_ctx)
-    system = _system_prompt(rendered)
-    # Local switch — user can toggle off mid-session via /no-diff.
     diff_loop_active = config.diff_loop_enabled
     model_picker_cache: list[str] = []
 
@@ -220,6 +217,13 @@ def run_repl(
             task_id=f"repl-{config.project_id}",
             project_id=config.project_id,
         )
+
+    # Build epoch context (immutable baseline + change detection for sources).
+    # Baseline goes into the system prompt; changed sources emit mid-conversation
+    # system messages on subsequent turns.
+    from .context_loader import build_epoch_context, reconcile_context
+    epoch = build_epoch_context(repo_ctx)
+    system = _system_prompt(epoch.baseline)
     console.print(
         Panel.fit(
             f"[green]baird code[/green]  project={config.project_id}  model={config.model}\n"
@@ -463,6 +467,37 @@ def run_repl(
             color = {"call": "cyan", "result": "dim", "blocked": "yellow"}.get(event, "dim")
             console.print(f"[{color}][{event}][/{color}] {detail}")
 
+        # Reconcile context sources that may have changed since last turn.
+        # Injects any detected changes as system messages in the session so
+        # they appear in the model's context before the user's message.
+        if config.project_root is not None:
+            try:
+                from .context_loader import (
+                    _git_log_oneline, _git_status, _build_tree,
+                    GIT_LOG_SOURCE, GIT_STATUS_SOURCE, TREE_SOURCE,
+                )
+                fresh = RepoContext(
+                    # Minimal — only the fields used by tracked sources
+                    project=repo_ctx.project, project_root=config.project_root,
+                    branch=repo_ctx.branch,
+                    git_log_lines=_git_log_oneline(config.project_root, n=10),
+                    git_status=_git_status(config.project_root),
+                    tree=_build_tree(config.project_root),
+                    relevant_files=repo_ctx.relevant_files,
+                    decisions=repo_ctx.decisions,
+                    action_summaries=repo_ctx.action_summaries,
+                    rules_summary=repo_ctx.rules_summary,
+                    host_id=repo_ctx.host_id,
+                    locations=repo_ctx.locations,
+                    parent=repo_ctx.parent,
+                )
+                updates = reconcile_context(epoch, fresh)
+                for key, content in updates:
+                    msg_text = f"[context update: {key}]\n{content}"
+                    hub.append_message(session["id"], role="system", content=msg_text)
+            except Exception:
+                pass  # context update failure must not block the turn
+
         try:
             completion = _one_turn(
                 user_msg=line,
@@ -527,7 +562,7 @@ def _one_turn(
          `agent_tools.dispatch`, append the assistant + tool result messages
          to the local history, and call the model again.
       3. Repeat until the model returns plain content (no tool calls) or we
-         hit `MAX_AGENT_ROUNDS` (currently 6).
+         hit `MAX_AGENT_ROUNDS` (currently 12).
 
     Tier-3 (destructive) tool calls are blocked by default — they need
     explicit user approval via a slash command, not silent agent execution.
@@ -535,16 +570,19 @@ def _one_turn(
     adapt rather than silently failing.
 
     Cost / tokens are accumulated across rounds and recorded on a single
-    Action row. Only the final assistant message (no tool calls) is persisted
-    to the session — intermediate rounds stay in-process so DB history
-    remains "user → final assistant" per turn.
+    Action row. Every assistant message (including intermediate rounds with
+    tool_calls) and every tool result is persisted to the session so the
+    conversation history is fully replayable.
 
-    `on_chunk` is honored only on the FINAL round (when no more tool calls
-    are expected) — intermediate rounds use non-streaming requests because
-    OpenRouter returns tool_calls at end-of-stream anyway.
+    Every provider call is streamed (tools are sent alongside the stream
+    request, and tool_call deltas are accumulated from the stream). The
+    `on_chunk` callback fires for every content delta and tool_call.
 
     `on_tool_event(event, detail)` is called for visibility: `event` is one
     of `call` / `result` / `blocked`.
+
+    Tool calls from the same round are dispatched concurrently via
+    `ThreadPoolExecutor` since they are independent.
     """
     from .agent_tools import (
         ApprovalGate,
@@ -588,25 +626,34 @@ def _one_turn(
         _drift_corrected = False
 
         for round_idx in range(MAX_AGENT_ROUNDS):
-            # Stream only on what we *think* is the final round; if it turns
-            # out to have tool_calls, that's fine — partial content was just
-            # the model's preamble.
-            use_stream = on_chunk is not None and round_idx > 0
-            if use_stream:
-                completion = model_client.stream_complete(
-                    model=config.model, messages=msgs,
-                    max_tokens=config.max_tokens, temperature=config.temperature,
-                    system=system, on_chunk=on_chunk,
-                )
-            else:
-                completion = model_client.complete(
-                    model=config.model, messages=msgs,
-                    max_tokens=config.max_tokens, temperature=config.temperature,
-                    system=system, tools=tools_schema,
-                )
+            # Stream every round — tools are sent alongside the stream request
+            # and tool_call deltas are accumulated from stream chunks.
+            completion = model_client.stream_complete(
+                model=config.model, messages=msgs,
+                max_tokens=config.max_tokens, temperature=config.temperature,
+                system=system, tools=tools_schema, on_chunk=on_chunk,
+            )
             total_cost += completion.cost_usd
             total_input += completion.usage.input_tokens
             total_output += completion.usage.output_tokens
+
+            # Build the structured assistant message dict
+            assistant_msg: dict = {
+                "role": "assistant",
+                "content": completion.content or None,
+            }
+            if completion.tool_calls:
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": _json.dumps(tc["arguments"]),
+                        },
+                    }
+                    for tc in completion.tool_calls
+                ]
 
             if not completion.tool_calls:
                 # Self-healing: if the model emitted text-shaped tool-call
@@ -658,46 +705,61 @@ def _one_turn(
                             "tool_call_id": f"text_{round_idx}_{tc['name']}",
                             "content": result_str,
                         })
+                        hub.append_message(
+                            session_id, role="tool",
+                            content=result_str,
+                            tool_call_id=f"text_{round_idx}_{tc['name']}",
+                        )
                     continue
 
-                # Final turn — stream the content for the caller if requested
-                # and we haven't already.
-                if on_chunk is not None and not use_stream and completion.content:
-                    on_chunk(completion.content)
+                # Persist the final assistant message (no tool_calls) and break.
+                hub.append_message(
+                    session_id, role="assistant", content=completion.content
+                )
                 break
 
-            # Persist the assistant message with tool_calls into the in-process
-            # history so the next model call sees it.
-            msgs.append({
-                "role": "assistant",
-                "content": completion.content or None,
-                "tool_calls": [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": _json.dumps(tc["arguments"]),
-                        },
-                    }
-                    for tc in completion.tool_calls
-                ],
-            })
+            # --- Round with tool_calls ---
 
-            for tc in completion.tool_calls:
-                result_str = _dispatch_tool_call(
+            # Persist assistant message with tool_calls
+            msgs.append(assistant_msg)
+            hub.append_message(
+                session_id, role="assistant", content=completion.content,
+                tool_calls=assistant_msg["tool_calls"],
+            )
+
+            # Dispatch tool calls concurrently since they are independent.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _run_one(tc: dict) -> tuple[str, str]:
+                result = _dispatch_tool_call(
                     tc, catalogue=catalogue, env=env, gate=gate,
                     on_tool_event=on_tool_event,
                 )
+                return tc["id"], result
+
+            results: dict[str, str] = {}
+            with ThreadPoolExecutor(max_workers=len(completion.tool_calls)) as pool:
+                futures = {pool.submit(_run_one, tc): tc for tc in completion.tool_calls}
+                for f in as_completed(futures):
+                    tc_id, result_str = f.result()
+                    results[tc_id] = result_str
+
+            # Append tool results in original order for deterministic history
+            for tc in completion.tool_calls:
+                result_str = results[tc["id"]]
                 msgs.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
                     "content": result_str,
                 })
+                hub.append_message(
+                    session_id, role="tool",
+                    content=result_str,
+                    tool_call_id=tc["id"],
+                )
 
-        # Final completion exists; persist its content and the aggregated usage.
+        # Final completion exists; record aggregated usage.
         assert completion is not None
-        hub.append_message(session_id, role="assistant", content=completion.content)
         action.record_usage(
             cost_usd=total_cost,
             input_tokens=total_input,

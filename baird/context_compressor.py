@@ -112,7 +112,12 @@ def _sanitised(msg: dict[str, Any]) -> dict[str, Any]:
         # turn shape stays valid (some providers reject empty-content messages)
         # without re-exposing the original markup.
         content = stripped or "(text-shaped tool call removed from history)"
-    return {"role": msg["role"], "content": content}
+    out = {"role": msg["role"], "content": content}
+    if msg.get("tool_calls"):
+        out["tool_calls"] = msg["tool_calls"]
+    if msg.get("tool_call_id"):
+        out["tool_call_id"] = msg["tool_call_id"]
+    return out
 
 
 def clear_cache() -> None:

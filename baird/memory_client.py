@@ -431,11 +431,17 @@ class HubClient:
         *,
         role: str,
         content: str,
-        tool_calls: dict | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
+        tool_call_id: str | None = None,
     ) -> dict:
         r = self._client.post(
             f"/sessions/{session_id}/messages",
-            json={"role": role, "content": content, "tool_calls": tool_calls},
+            json={
+                "role": role,
+                "content": content,
+                "tool_calls": tool_calls,
+                "tool_call_id": tool_call_id,
+            },
         )
         r.raise_for_status()
         return r.json()

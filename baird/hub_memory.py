@@ -145,7 +145,8 @@ class SessionOut(SessionIn):
 class MessageIn(BaseModel):
     role: str
     content: str
-    tool_calls: Optional[dict[str, Any]] = None
+    tool_calls: Optional[list[dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
 
 
 class MessageOut(MessageIn):
@@ -727,6 +728,7 @@ def register_routes(app: FastAPI) -> None:
             role=payload.role,
             content=payload.content,
             tool_calls=payload.tool_calls,
+            tool_call_id=payload.tool_call_id,
         )
         sess.last_active_at = _utcnow()
         s.add(row)
@@ -738,6 +740,7 @@ def register_routes(app: FastAPI) -> None:
             role=row.role,
             content=row.content,
             tool_calls=row.tool_calls,
+            tool_call_id=row.tool_call_id,
             created_at=row.created_at,
         )
 
