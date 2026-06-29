@@ -898,10 +898,10 @@ def update(
                 uv_bin = "\"$HOME/.local/bin/uv\""
                 restart_script = (
                     "cd /tmp && "
-                    "env PATH=\"$HOME/.local/bin:$PATH\" "
+                    "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
                     "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
                     "</dev/null >/tmp/baird-daemon.log 2>&1 & "
-                    "echo restart_ok"
+                    "disown; echo restart_ok"
                 )
                 r2 = _subprocess.run(
                     ["ssh", ssh_host, restart_script],
