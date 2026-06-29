@@ -618,6 +618,29 @@ def dispatch(
     )
 
 
+def tools_openai_schema(catalogue: dict[str, Tool] | None = None) -> list[dict[str, Any]]:
+    """Render the tool catalogue in OpenAI function-calling schema, suitable
+    for passing as `tools=[...]` on a chat completions request.
+
+    The `parameters` field on each Tool already conforms to JSONSchema, so the
+    transform is a thin wrapper. Models that support OpenAI-style tool calling
+    (most current frontier models + many on OpenRouter) can then emit
+    structured `tool_calls` instead of free-form text the agent has to parse.
+    """
+    cat = catalogue if catalogue is not None else build_catalogue()
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            },
+        }
+        for tool in cat.values()
+    ]
+
+
 def tool_catalogue_prompt(catalogue: dict[str, Tool] | None = None) -> str:
     """Render the tool catalogue as a system-prompt block.
 
@@ -656,6 +679,7 @@ __all__ = [
     "DispatchResult",
     "build_catalogue",
     "classify_tool_call",
+    "tools_openai_schema",
     "dispatch",
     "tool_catalogue_prompt",
 ]

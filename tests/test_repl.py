@@ -289,6 +289,203 @@ def test_repl_audit_satellite_hands_off_to_model(
     assert "audit reply" in out
 
 
+def test_repl_agent_loop_dispatches_tool_then_replies(
+    tmp_path: Path, client: TestClient
+) -> None:
+    """End-to-end: model emits a tool_call → REPL dispatches via agent_tools →
+    appends tool result → model gives final answer. The user sees [call] +
+    [result] lines and the final assistant content."""
+    hub = _Hub(client)
+    hub.upsert_project(id="p-agent", name="p-agent")
+
+    # Sequence of responses: first turn returns a tool_call, second returns
+    # plain content. The transport inspects round number from message count.
+    transport_calls: list[dict] = []
+    def _t(req):
+        transport_calls.append(req)
+        body = req["body"]
+        # Detect round by whether a tool message is already in history.
+        had_tool_result = any(m.get("role") == "tool" for m in body["messages"])
+        if not had_tool_result:
+            # Round 1: emit a tool_call. (Use a tool from the catalogue that
+            # doesn't need a satellite — `where` works against the hub.)
+            return {
+                "choices": [{
+                    "message": {
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "where",
+                                "arguments": '{"query": "x"}',
+                            },
+                        }],
+                    },
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.0001},
+            }
+        # Round 2: final answer.
+        return {
+            "choices": [{"message": {"content": "final answer"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 6, "cost": 0.0002},
+        }
+    model_client = OpenRouterClient(transport=_t)
+
+    console = Console(record=True, width=160)
+    stats = run_repl(
+        repo_ctx=_ctx(tmp_path),
+        hub=hub,
+        model_client=model_client,
+        config=ReplConfig(project_id="p-agent"),
+        console=console,
+        inputs=["go", "/exit"],
+    )
+
+    assert stats.turns == 1
+    # Two upstream calls made for one user turn (tool_call, then follow-up).
+    assert len(transport_calls) == 2
+    # Second call must include the tool result in its messages.
+    second_msgs = transport_calls[1]["body"]["messages"]
+    assert any(m.get("role") == "tool" and m.get("tool_call_id") == "call_1"
+               for m in second_msgs)
+    out = console.export_text()
+    # Rich strips style tags from export_text; assert on the structured bits.
+    assert "where(" in out
+    assert "where:" in out
+    assert "final answer" in out
+    # Cost is aggregated across both rounds.
+    assert stats.total_cost_usd == pytest.approx(0.0003)
+
+
+def test_repl_agent_loop_blocks_destructive_tool(
+    tmp_path: Path, client: TestClient
+) -> None:
+    """A tier-3 (destructive) tool call from the model should be blocked back
+    to the model rather than auto-run. The block is reported as a `tool`
+    message so the model can adapt."""
+    hub = _Hub(client)
+    hub.upsert_project(id="p-block", name="p-block")
+
+    transport_calls: list[dict] = []
+    def _t(req):
+        transport_calls.append(req)
+        body = req["body"]
+        had_tool_result = any(m.get("role") == "tool" for m in body["messages"])
+        if not had_tool_result:
+            return {
+                "choices": [{
+                    "message": {
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call_x",
+                            "type": "function",
+                            "function": {
+                                "name": "install_env",
+                                "arguments": '{"host": "workstation", '
+                                             '"project_id": "p-block", '
+                                             '"env_spec": "numpy"}',
+                            },
+                        }],
+                    },
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.0001},
+            }
+        return {
+            "choices": [{"message": {"content": "ok, will leave that to you"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 6, "cost": 0.0002},
+        }
+    model_client = OpenRouterClient(transport=_t)
+
+    console = Console(record=True, width=160)
+    run_repl(
+        repo_ctx=_ctx(tmp_path),
+        hub=hub,
+        model_client=model_client,
+        config=ReplConfig(project_id="p-block"),
+        console=console,
+        inputs=["please install numpy on workstation", "/exit"],
+    )
+    out = console.export_text()
+    assert "install_env" in out
+    assert "destructive" in out or "tier-3" in out
+    # The tool result message sent back to the model carries the BLOCKED text.
+    second_msgs = transport_calls[1]["body"]["messages"]
+    tool_msg = next(
+        m for m in second_msgs if m.get("role") == "tool"
+    )
+    assert "BLOCKED" in tool_msg["content"]
+
+
+def test_repl_agent_loop_caps_at_max_rounds(
+    tmp_path: Path, client: TestClient
+) -> None:
+    """If the model keeps emitting tool_calls forever, the loop bounds it at
+    MAX_AGENT_ROUNDS and returns the latest completion (even if it still has
+    tool_calls)."""
+    from baird.repl import MAX_AGENT_ROUNDS
+
+    hub = _Hub(client)
+    hub.upsert_project(id="p-loop", name="p-loop")
+
+    transport_calls = 0
+    def _t(req):
+        nonlocal transport_calls
+        transport_calls += 1
+        return {
+            "choices": [{
+                "message": {
+                    "content": None,
+                    "tool_calls": [{
+                        "id": f"call_{transport_calls}",
+                        "type": "function",
+                        "function": {
+                            "name": "where",
+                            "arguments": '{"query": "x"}',
+                        },
+                    }],
+                },
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "cost": 0.0001},
+        }
+    model_client = OpenRouterClient(transport=_t)
+    console = Console(record=True, width=120)
+    run_repl(
+        repo_ctx=_ctx(tmp_path),
+        hub=hub,
+        model_client=model_client,
+        config=ReplConfig(project_id="p-loop"),
+        console=console,
+        inputs=["go", "/exit"],
+    )
+    # The model is called once per round, never more than MAX_AGENT_ROUNDS.
+    assert transport_calls == MAX_AGENT_ROUNDS
+
+
+def test_completion_parses_tool_calls() -> None:
+    """Direct unit test of Completion-side parsing."""
+    client = OpenRouterClient(transport=lambda _r: {
+        "choices": [{
+            "message": {
+                "content": None,
+                "tool_calls": [{
+                    "id": "abc",
+                    "type": "function",
+                    "function": {
+                        "name": "run_on",
+                        "arguments": '{"host": "workstation", "command": "ls"}',
+                    },
+                }],
+            },
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0},
+    })
+    c = client.complete(model="any", messages=[{"role": "user", "content": "hi"}])
+    assert len(c.tool_calls) == 1
+    assert c.tool_calls[0]["name"] == "run_on"
+    assert c.tool_calls[0]["arguments"] == {"host": "workstation", "command": "ls"}
+
+
 def test_repl_records_action_per_turn(tmp_path: Path, client: TestClient) -> None:
     hub = _Hub(client)
     console = Console(record=True, width=120)
