@@ -802,6 +802,117 @@ def cmd_audit_satellite(parts: list[str], ctx: SlashContext) -> SlashResult:
     )
 
 
+# ---- /satellite enroll | list | remove --------------------------------
+
+
+def cmd_satellite_enroll(parts: list[str], ctx: SlashContext) -> SlashResult:
+    """Enroll a satellite from inside the REPL — no bash needed.
+
+    Usage:
+      /satellite enroll <ssh-host> [--host-id <id>] [--git-ref <ref>]
+      /satellite enroll ssh-host=<x> host-id=<id> git-ref=main
+
+    Wraps `baird.satellite.enroll` end-to-end: SSH out, clone BAIRD on the
+    satellite, write `host.yaml`, stand up the tunnel locally, verify the
+    round-trip, save to the local registry.
+    """
+    pos, kv, err = parse_inline_args(parts)
+    if err:
+        return SlashResult(handled=True, ok=False, output=err)
+    known = dict(kv)
+    if pos:
+        known.setdefault("ssh-host", pos[0])
+    guard = _reject_flaglike_values(known)
+    if guard:
+        return SlashResult(handled=True, ok=False, output=guard)
+    fields = [
+        FormField("ssh-host", "ssh alias (~/.ssh/config) or user@host", required=True),
+        FormField("host-id", "BAIRD host_id (defaults to ssh-host)", required=False),
+        FormField("git-ref", "git tag/branch to install (default: main)",
+                  default="main", required=False),
+    ]
+    vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
+
+    try:
+        from .satellite import enroll, enroll_spec_from_local
+    except Exception as e:
+        return SlashResult(handled=True, ok=False, output=f"satellite import failed: {e}")
+
+    ssh_host = vals["ssh-host"]
+    host_id = vals.get("host-id") or None
+    git_ref = vals.get("git-ref") or "main"
+    spec = enroll_spec_from_local(ssh_host, host_id=host_id, git_ref=git_ref)
+    spec.use_hub_for_models = True
+
+    try:
+        res = enroll(spec)
+    except Exception as e:
+        return SlashResult(handled=True, ok=False, output=f"enrolment raised: {e}")
+    if not res.health_ok:
+        return SlashResult(
+            handled=True, ok=False,
+            output=f"enrolment failed: {res.detail or '(no detail)'}",
+        )
+    return SlashResult(
+        handled=True,
+        output=(
+            f"enrolled {res.ssh_host} (host_id={spec.host_id}) "
+            f"port={res.local_fwd_port} home={res.remote_home}"
+        ),
+        active_host=spec.host_id,
+    )
+
+
+def cmd_satellite_list(parts: list[str], ctx: SlashContext) -> SlashResult:
+    """List enrolled satellites with tunnel status."""
+    try:
+        from .satellite import load_registry, tunnel_status
+    except Exception as e:
+        return SlashResult(handled=True, ok=False, output=f"satellite import failed: {e}")
+    reg = load_registry()
+    if not reg:
+        return SlashResult(handled=True, output="no satellites enrolled")
+    lines = ["host_id           ssh_host           port   tunnel"]
+    for host_id, entry in sorted(reg.items()):
+        try:
+            tstatus = tunnel_status(entry.get("ssh_host", ""))
+        except Exception:
+            tstatus = "?"
+        lines.append(
+            f"{host_id:<16}  {entry.get('ssh_host',''):<16}  "
+            f"{entry.get('local_fwd_port',''):<5}  {tstatus}"
+        )
+    return SlashResult(handled=True, output="\n".join(lines))
+
+
+def cmd_satellite_remove(parts: list[str], ctx: SlashContext) -> SlashResult:
+    """Remove a satellite from the local registry. Does NOT uninstall BAIRD
+    on the satellite — it just stops the hub from talking to it."""
+    pos, kv, err = parse_inline_args(parts)
+    if err:
+        return SlashResult(handled=True, ok=False, output=err)
+    known = dict(kv)
+    if pos:
+        known.setdefault("host-id", pos[0])
+    guard = _reject_flaglike_values(known)
+    if guard:
+        return SlashResult(handled=True, ok=False, output=guard)
+    fields = [FormField("host-id", "satellite host_id to remove", required=True)]
+    vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
+
+    try:
+        from .satellite import load_registry, save_registry
+    except Exception as e:
+        return SlashResult(handled=True, ok=False, output=f"satellite import failed: {e}")
+    reg = load_registry()
+    host_id = vals["host-id"]
+    if host_id not in reg:
+        return SlashResult(handled=True, ok=False, output=f"no satellite named {host_id!r}")
+    del reg[host_id]
+    save_registry(reg)
+    return SlashResult(handled=True, output=f"removed {host_id}")
+
+
 # ---- tool runner -----------------------------------------------------
 
 
@@ -1049,6 +1160,9 @@ _COMMANDS: dict[str, HandlerFn] = {
     "where": cmd_where,
     "run": cmd_run_on,
     "audit-satellite": cmd_audit_satellite,
+    "satellite enroll": cmd_satellite_enroll,
+    "satellite list": cmd_satellite_list,
+    "satellite remove": cmd_satellite_remove,
 }
 
 

@@ -99,3 +99,30 @@ def test_overrides_from_project_yaml() -> None:
     assert len(out) == 1
     assert out[0].tier == Tier.PROJECT
     assert out[0].reason == "vetted runner"
+
+
+def test_common_readonly_probes_are_safe() -> None:
+    """Agent-loop tools probe satellites with hostname / df / stat / etc. as
+    cheap reconnaissance. These must classify as safe — if they fall through
+    to destructive (deny-by-default), the agent's first move gets blocked."""
+    for cmd in [
+        "hostname",
+        "whoami",
+        "id",
+        "uname -a",
+        "uptime",
+        "date",
+        "env",
+        "printenv HOME",
+        "df -h",
+        "du -sh /tmp",
+        "ps aux",
+        "stat /etc",
+        "realpath /tmp",
+        "readlink /etc/hostname",
+        "basename /path/to/file",
+        "dirname /path/to/file",
+        "md5sum /etc/hostname",
+        "find /tmp -name '*.txt'",
+    ]:
+        assert classify_command(cmd).tier == Tier.SAFE, f"{cmd!r} not safe"
