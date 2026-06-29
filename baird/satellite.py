@@ -100,7 +100,7 @@ ExecStart=/usr/bin/ssh -N \\
     -o StreamLocalBindUnlink=yes \\
     -o BatchMode=yes \\
     -R 8000:localhost:8000 \\
-    -L ${LOCAL_FWD_PORT}:localhost:8765 \\
+    -L ${LOCAL_FWD_PORT}:localhost:${SATELLITE_PORT:-8765} \\
     %i
 Restart=always
 RestartSec=10

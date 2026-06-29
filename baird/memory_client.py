@@ -496,6 +496,16 @@ class HubClient:
         r.raise_for_status()
         return r.json()
 
+    # ---- Tunnel management ----
+
+    def update_tunnel(self, host_id: str, satellite_port: int) -> dict:
+        r = self._client.post(
+            "/api/tunnel/update",
+            json={"host_id": host_id, "satellite_port": satellite_port},
+        )
+        r.raise_for_status()
+        return r.json()
+
     # ---- Recall ----
 
     def recall(

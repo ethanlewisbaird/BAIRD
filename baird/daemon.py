@@ -115,13 +115,54 @@ class WatchdogDaemon:
 
         log.info("BAIRD daemon ready on host_id=%s", self.cfg.host_id)
 
+    def _find_free_port(self, host: str, start: int, max_attempts: int = 20) -> int | None:
+        import socket
+
+        for port in range(start, start + max_attempts):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind((host, port))
+                    return port
+                except OSError:
+                    continue
+        return None
+
+    def _persist_executor_listen(self, host: str, port: int) -> None:
+        import yaml
+
+        self.cfg.executor_listen = f"{host}:{port}"
+        from . import paths
+
+        cfg_path = paths.host_yaml_path()
+        raw = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
+        raw["executor_listen"] = f"{host}:{port}"
+        cfg_path.write_text(yaml.dump(raw, default_flow_style=False))
+
     def _executor_serve(self) -> None:
-        from .executor import create_executor_app
         import uvicorn
 
-        host, _, port = (self.cfg.executor_listen or "").partition(":")
+        from .executor import create_executor_app
+
+        host, _, port_str = (self.cfg.executor_listen or "").partition(":")
+        host = host or "127.0.0.1"
+        base_port = int(port_str or "8765")
+
+        port = self._find_free_port(host, base_port)
+        if port is None:
+            log.error("no free port found in range %d-%d", base_port, base_port + 19)
+            return
+
+        if port != base_port:
+            log.warning("configured port %d in use; using port %d instead", base_port, port)
+            self._persist_executor_listen(host, port)
+            try:
+                self.hub.update_tunnel(self.cfg.host_id, port)
+            except Exception:
+                log.exception("failed to notify hub of tunnel port change")
+
         app = create_executor_app(self.cfg)
-        config = uvicorn.Config(app, host=host or "127.0.0.1", port=int(port or "8765"), log_level="info")
+        config = uvicorn.Config(app, host=host, port=port, log_level="info")
         server = uvicorn.Server(config)
         try:
             server.run()

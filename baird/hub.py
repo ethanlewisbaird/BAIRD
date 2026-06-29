@@ -213,6 +213,48 @@ def create_app(hub_cfg: Optional[HubConfig] = None) -> FastAPI:
         s.refresh(row)
         return _to_out(row)
 
+    # ---- Tunnel management ----
+    from .satellite import load_registry
+
+    class TunnelUpdateIn(BaseModel):
+        host_id: str
+        satellite_port: int
+
+    @app.post("/api/tunnel/update")
+    def update_tunnel(payload: TunnelUpdateIn) -> dict:
+        import subprocess
+        from pathlib import Path
+
+        reg = load_registry()
+        entry = reg.get(payload.host_id)
+        if entry is None:
+            raise HTTPException(404, f"host {payload.host_id!r} not in satellite registry")
+        ssh_host = entry["ssh_host"]
+        env_dir = Path.home() / ".config/baird"
+        env_file = env_dir / f"tunnel-{ssh_host}.env"
+        if not env_file.exists():
+            raise HTTPException(404, f"tunnel env file not found for {ssh_host}")
+        lines = env_file.read_text().splitlines()
+        found = False
+        for i, line in enumerate(lines):
+            if line.startswith("SATELLITE_PORT="):
+                lines[i] = f"SATELLITE_PORT={payload.satellite_port}"
+                found = True
+                break
+        if not found:
+            lines.append(f"SATELLITE_PORT={payload.satellite_port}")
+        env_file.write_text("\n".join(lines) + "\n")
+        subprocess.run(
+            ["systemctl", "--user", "restart", f"baird-tunnel@{ssh_host}"],
+            capture_output=True,
+            timeout=30,
+        )
+        return {
+            "status": "ok",
+            "host_id": payload.host_id,
+            "satellite_port": payload.satellite_port,
+        }
+
     # ---- Phase 2 routes (registered from sibling module) ----
     from . import hub_memory
 
