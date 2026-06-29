@@ -101,6 +101,34 @@ def strip_text_tool_calls(content: str | None) -> str:
     return out.strip()
 
 
+_TEXT_TOOL_CALL_BLOCK = re.compile(
+    r"<longcat_tool_call\b([^>]*)>(.*?)</longcat_tool_call\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_TEXT_TOOL_ARG = re.compile(
+    r"<longcat_arg_key\b([^>]*)>(.*?)</longcat_arg_key\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def parse_text_tool_calls(content: str) -> list[dict]:
+    """Parse `<longcat_tool_call>...</longcat_tool_call>` blocks into
+    `{name, arguments}` dicts that the dispatch function can consume."""
+    calls: list[dict] = []
+    for block in _TEXT_TOOL_CALL_BLOCK.finditer(content):
+        tool_body = block.group(2).strip()
+        lines = tool_body.splitlines()
+        name = lines[0].strip() if lines else ""
+        args: dict[str, str] = {}
+        for arg_match in _TEXT_TOOL_ARG.finditer(tool_body):
+            key = arg_match.group(1).strip()
+            val = arg_match.group(2).strip()
+            args[key] = val
+        if name:
+            calls.append({"name": name, "arguments": args})
+    return calls
+
+
 _DRIFT_CORRECTION = (
     "Your previous turn contained a text-shaped tool call (e.g. "
     "<longcat_tool_call>... or a tool_call fenced block) but the function-"
@@ -604,6 +632,34 @@ def _one_turn(
                     msgs.append({"role": "system", "content": _DRIFT_CORRECTION})
                     _drift_corrected = True
                     continue
+
+                # Fallback: execute text-shaped tool calls directly when the
+                # model persists after the drift nudge.
+                text_calls = parse_text_tool_calls(completion.content or "")
+                if text_calls:
+                    if on_tool_event:
+                        on_tool_event(
+                            "drift",
+                            f"executing {len(text_calls)} text-shaped tool call(s)",
+                        )
+                    msgs.append({
+                        "role": "assistant",
+                        "content": strip_text_tool_calls(completion.content)
+                                   or "(text-shaped tool call removed)",
+                    })
+                    for tc in text_calls:
+                        result_str = _dispatch_tool_call(
+                            {**tc, "id": f"text_{round_idx}_{tc['name']}"},
+                            catalogue=catalogue, env=env, gate=gate,
+                            on_tool_event=on_tool_event,
+                        )
+                        msgs.append({
+                            "role": "tool",
+                            "tool_call_id": f"text_{round_idx}_{tc['name']}",
+                            "content": result_str,
+                        })
+                    continue
+
                 # Final turn — stream the content for the caller if requested
                 # and we haven't already.
                 if on_chunk is not None and not use_stream and completion.content:
