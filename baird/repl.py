@@ -158,6 +158,7 @@ class ReplConfig:
     history_cap: int = HISTORY_TURN_CAP
     project_root: Path | None = None  # required for diff_apply
     diff_loop_enabled: bool = True
+    agent_mode: str = "build"
 
 
 def _system_prompt(rendered_context: str) -> str:
@@ -224,6 +225,11 @@ def run_repl(
     from .context_loader import build_epoch_context, reconcile_context
     epoch = build_epoch_context(repo_ctx)
     system = _system_prompt(epoch.baseline)
+
+    # Dynamic tool registry shared across the session.
+    from .agent_tools import AgentMode, ToolRegistry
+    tool_registry = ToolRegistry()
+    agent_mode = AgentMode.BUILD if config.agent_mode == "build" else AgentMode.PLAN
     console.print(
         Panel.fit(
             f"[green]baird code[/green]  project={config.project_id}  model={config.model}\n"
@@ -270,7 +276,7 @@ def run_repl(
             # baird/slash.py (project/host/env/where/run on …). Returns None
             # when the line doesn't match a registered verb, in which case
             # the legacy REPL-internal commands below take a turn.
-            from .agent_tools import ToolEnv
+            from .agent_tools import ToolEnv, ToolRegistry
             from .slash import SlashContext, try_dispatch as _try_slash
 
             slash_ctx = SlashContext(
@@ -507,6 +513,8 @@ def run_repl(
                 config=config,
                 system=system,
                 host_id=host_id,
+                tool_registry=tool_registry,
+                agent_mode=agent_mode,
                 on_tool_event=_on_tool_event,
             )
         except ModelError as e:
@@ -550,6 +558,8 @@ def _one_turn(
     config: ReplConfig,
     system: str,
     host_id: str | None,
+    tool_registry: ToolRegistry | None = None,
+    agent_mode: AgentMode | None = None,
     on_chunk: Callable[[str], None] | None = None,
     on_tool_event: Callable[[str, str], None] | None = None,
 ) -> Completion:
@@ -585,16 +595,16 @@ def _one_turn(
     `ThreadPoolExecutor` since they are independent.
     """
     from .agent_tools import (
+        AgentMode,
         ApprovalGate,
         ToolEnv,
-        build_catalogue,
-        classify_tool_call,
+        ToolRegistry,
         dispatch,
         tools_openai_schema,
     )
     from .context_compressor import load_history_with_summary
 
-    catalogue = build_catalogue()
+    catalogue = tool_registry.tools(agent_mode)
     tools_schema = tools_openai_schema(catalogue)
     env = ToolEnv(hub=hub, project_id=config.project_id)
     # Auto-run tier-1 + tier-2 calls; tier-3 (destructive) is rejected back to

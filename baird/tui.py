@@ -200,6 +200,11 @@ def run_tui_repl(
     epoch = build_epoch_context(repo_ctx)
     system = _system_prompt(epoch.baseline)
 
+    # Dynamic tool registry shared across the session.
+    from .agent_tools import AgentMode, ToolRegistry
+    tool_registry = ToolRegistry()
+    agent_mode = getattr(config, "_agent_mode", AgentMode.BUILD)
+
     iterator: Iterable[str] | None = iter(inputs) if inputs is not None else None
 
     def _print(line: Text | str) -> None:
@@ -450,6 +455,8 @@ def run_tui_repl(
                     config=config,
                     system=system,
                     host_id=host_id,
+                    tool_registry=tool_registry,
+                    agent_mode=agent_mode,
                     on_chunk=_on_chunk,
                 )
             except ModelError as e:

@@ -154,6 +154,10 @@ def code(
         True, "--tui/--no-tui",
         help="Default is the persistent layout; --no-tui falls back to the line REPL.",
     ),
+    mode: str = typer.Option(
+        "build", "--mode", "-M",
+        help="Agent mode: 'build' (full access) or 'plan' (read-only, safe tools only).",
+    ),
 ) -> None:
     """Interactive coding mode.
 
@@ -213,6 +217,7 @@ def code(
     repl_cfg_kwargs: dict[str, object] = {
         "project_id": ctx.project.id,
         "project_root": ctx.project_root,
+        "agent_mode": mode,
     }
     if resolved_model:
         repl_cfg_kwargs["model"] = resolved_model

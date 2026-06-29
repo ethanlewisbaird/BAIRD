@@ -24,12 +24,277 @@ when the user has already named one.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from .memory_client import HubClient
 from .permissions import Decision, Tier, classify_command, classify_write
 from .satellite import load_registry
+
+
+class AgentMode(str, Enum):
+    """Defines which tools are visible to the model.
+
+    - BUILD: full tool access (default coding mode)
+    - PLAN: read-only analysis (safe tools only)
+    """
+
+    BUILD = "build"
+    PLAN = "plan"
+
+    def filter_tools(self, catalogue: dict[str, Tool]) -> dict[str, Tool]:
+        """Return the subset of `catalogue` visible in this mode."""
+        if self == AgentMode.BUILD:
+            return dict(catalogue)
+        # PLAN mode: only safe tools
+        return {k: v for k, v in catalogue.items() if v.tier == Tier.SAFE}
+
+
+class ToolRegistry:
+    """Dynamic tool registry supporting register/unregister at runtime.
+
+    Wraps the default catalogue and allows plugins (e.g. MCP servers) to
+    add or remove tools without editing source code.
+    """
+
+    def __init__(self) -> None:
+        self._tools: dict[str, Tool] = {}
+        self._defaults = build_default_catalogue()
+
+    def tools(self, mode: AgentMode = AgentMode.BUILD) -> dict[str, Tool]:
+        """Return all visible tools merged with runtime registrations."""
+        merged = dict(self._defaults)
+        merged.update(self._tools)
+        return mode.filter_tools(merged)
+
+    def register(self, tool: Tool) -> None:
+        """Add or replace a tool at runtime."""
+        self._tools[tool.name] = tool
+
+    def unregister(self, name: str) -> None:
+        """Remove a previously registered tool."""
+        self._tools.pop(name, None)
+
+
+def build_default_catalogue() -> dict[str, Tool]:
+    """Build the default tool set. Separated from ToolRegistry so tests
+    and one-off callers can get the stock tools without a registry."""
+    return {
+        "read_remote": Tool(
+            name="read_remote",
+            description="Read a UTF-8 text file on a satellite (tier 1, auto-run).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "host": _str_field("Satellite host_id."),
+                    "path": _str_field("Absolute path on the satellite."),
+                },
+                "required": ["host", "path"],
+            },
+            tier=Tier.SAFE,
+            fn=_read_remote,
+        ),
+        "write_remote": Tool(
+            name="write_remote",
+            description="Write a text file on a satellite, scoped to a project root (tier 2).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "host": _str_field("Satellite host_id."),
+                    "path": _str_field("Absolute path on the satellite."),
+                    "content": _str_field("UTF-8 file content."),
+                    "project_root": _str_field("Project root on the satellite, for tier scoping."),
+                },
+                "required": ["host", "path", "content"],
+            },
+            tier=Tier.PROJECT,
+            fn=_write_remote,
+        ),
+        "run_on": Tool(
+            name="run_on",
+            description=(
+                "Run a shell command on a satellite. Tier is computed from the "
+                "command via the standard safe/project/destructive classifier."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "host": _str_field("Satellite host_id."),
+                    "command": _str_field("Shell command line."),
+                    "cwd": _str_field("Working directory on the satellite."),
+                    "project_root": _str_field("Project root for permissions scoping."),
+                    "timeout_s": {"type": "number", "description": "Timeout in seconds."},
+                },
+                "required": ["host", "command"],
+            },
+            tier=Tier.PROJECT,  # baseline; reclassified per call
+            fn=_run_on,
+            needs_command_classification=True,
+        ),
+        "apply_diff_remote": Tool(
+            name="apply_diff_remote",
+            description="Apply a unified diff to a project on a satellite, then commit.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "host": _str_field("Satellite host_id."),
+                    "project_root": _str_field("Project root on the satellite."),
+                    "diff": _str_field("Unified-diff text."),
+                    "commit_message": _str_field("Commit message."),
+                },
+                "required": ["host", "project_root", "diff", "commit_message"],
+            },
+            tier=Tier.PROJECT,
+            fn=_apply_diff_remote,
+        ),
+        "register_project": Tool(
+            name="register_project",
+            description=(
+                "Create or update a project record on the hub. CALL THIS "
+                "when the user wants to set up a new project ('make a "
+                "project for the scRNA-seq work', 'register a project "
+                "called …'). Pair with add_project_location to attach "
+                "the (host, path) pairs the project spans."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "id": _str_field("Stable slug."),
+                    "name": _str_field("Human-readable name (defaults to id)."),
+                },
+                "required": ["id"],
+            },
+            tier=Tier.SAFE,
+            fn=_register_project,
+        ),
+        "add_project_location": Tool(
+            name="add_project_location",
+            description=(
+                "Attach a (host, path) location to a project. CALL THIS "
+                "whenever the user describes where a project lives — "
+                "phrases like 'data is on the GPU workstation at /data/x', "
+                "'location = workstation /scratch/y', 'the laptop has the "
+                "notebooks under …', or 'add another location for this "
+                "project'. The host argument is a satellite host_id from "
+                "the enrolled-hosts registry (see `baird satellite list`); "
+                "the path is the absolute path on that satellite. Do NOT "
+                "instead propose a diff against project.yaml — locations "
+                "live on the hub and only this tool persists them."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "project_id": _str_field("Project id."),
+                    "host": _str_field("Satellite host_id."),
+                    "path": _str_field("Absolute path on the satellite."),
+                    "role": _str_field("Optional role tag (data | compute | notebook | repo)."),
+                },
+                "required": ["project_id", "host", "path"],
+            },
+            tier=Tier.SAFE,
+            fn=_add_project_location,
+        ),
+        "list_projects": Tool(
+            name="list_projects",
+            description="List all projects registered with BAIRD on the hub.",
+            parameters={
+                "type": "object",
+                "properties": {},
+            },
+            tier=Tier.SAFE,
+            fn=_list_projects,
+        ),
+        "list_project_locations": Tool(
+            name="list_project_locations",
+            description="List all (host, path) locations for a project.",
+            parameters={
+                "type": "object",
+                "properties": {"project_id": _str_field("Project id.")},
+                "required": ["project_id"],
+            },
+            tier=Tier.SAFE,
+            fn=_list_project_locations,
+        ),
+        "set_watch_root": Tool(
+            name="set_watch_root",
+            description=(
+                "Edit a satellite's host.yaml `watch.roots` to point at a path "
+                "and restart its baird-daemon user unit. Tier 2 — autorun with warning."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "host": _str_field("Satellite host_id."),
+                    "path": _str_field("New watch root on the satellite."),
+                },
+                "required": ["host", "path"],
+            },
+            tier=Tier.PROJECT,
+            fn=_set_watch_root,
+        ),
+        "install_env": Tool(
+            name="install_env",
+            description=(
+                "Install an environment spec on a satellite (conda env file or pip "
+                "requirements). Tier 3 — always prompts before running."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "host": _str_field("Satellite host_id."),
+                    "project_id": _str_field("Project id for provenance."),
+                    "env_spec": _str_field("environment.yml body OR pip requirements list."),
+                },
+                "required": ["host", "project_id", "env_spec"],
+            },
+            tier=Tier.DESTRUCTIVE,
+            fn=_install_env,
+        ),
+        "where": Tool(
+            name="where",
+            description=(
+                "Resolve a data alias or path fragment against the active project's "
+                "locations and data_aliases — and across its parent + sibling "
+                "projects when the project sits under an umbrella (one-level "
+                "hierarchy). CALL THIS when the user asks 'where is X', 'which "
+                "host has the …', or references data from a sibling assay "
+                "('the scRNA cohort', 'the spatial counts'). The `project_id` "
+                "field on each hit names the family member the data came from."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": _str_field("Free-text query (alias name or path fragment)."),
+                    "project_id": _str_field("Project id; defaults to the active one."),
+                },
+                "required": ["query"],
+            },
+            tier=Tier.SAFE,
+            fn=_where,
+        ),
+        "list_siblings": Tool(
+            name="list_siblings",
+            description=(
+                "List sibling project ids — other children of the same parent. "
+                "CALL THIS when the user references another assay in the same "
+                "research programme ('what other assays are under umbrella programme?', "
+                "'list the other cohorts'), or when you need to know which "
+                "family members `where` would search. Empty list for top-level "
+                "projects (no parent → no siblings)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "project_id": _str_field("Project id; defaults to the active one."),
+                },
+                "required": [],
+            },
+            tier=Tier.SAFE,
+            fn=_list_siblings,
+        ),
+    }
+
 
 # ---- Environment passed to every tool ---------------------------------
 
@@ -321,223 +586,8 @@ def _str_field(desc: str) -> dict:
 
 
 def build_catalogue() -> dict[str, Tool]:
-    """Return the full tool registry. Built fresh per REPL session so a future
-    config knob can disable individual tools without leaking state."""
-
-    return {
-        "read_remote": Tool(
-            name="read_remote",
-            description="Read a UTF-8 text file on a satellite (tier 1, auto-run).",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "host": _str_field("Satellite host_id."),
-                    "path": _str_field("Absolute path on the satellite."),
-                },
-                "required": ["host", "path"],
-            },
-            tier=Tier.SAFE,
-            fn=_read_remote,
-        ),
-        "write_remote": Tool(
-            name="write_remote",
-            description="Write a text file on a satellite, scoped to a project root (tier 2).",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "host": _str_field("Satellite host_id."),
-                    "path": _str_field("Absolute path on the satellite."),
-                    "content": _str_field("UTF-8 file content."),
-                    "project_root": _str_field("Project root on the satellite, for tier scoping."),
-                },
-                "required": ["host", "path", "content"],
-            },
-            tier=Tier.PROJECT,
-            fn=_write_remote,
-        ),
-        "run_on": Tool(
-            name="run_on",
-            description=(
-                "Run a shell command on a satellite. Tier is computed from the "
-                "command via the standard safe/project/destructive classifier."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "host": _str_field("Satellite host_id."),
-                    "command": _str_field("Shell command line."),
-                    "cwd": _str_field("Working directory on the satellite."),
-                    "project_root": _str_field("Project root for permissions scoping."),
-                    "timeout_s": {"type": "number", "description": "Timeout in seconds."},
-                },
-                "required": ["host", "command"],
-            },
-            tier=Tier.PROJECT,  # baseline; reclassified per call
-            fn=_run_on,
-            needs_command_classification=True,
-        ),
-        "apply_diff_remote": Tool(
-            name="apply_diff_remote",
-            description="Apply a unified diff to a project on a satellite, then commit.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "host": _str_field("Satellite host_id."),
-                    "project_root": _str_field("Project root on the satellite."),
-                    "diff": _str_field("Unified-diff text."),
-                    "commit_message": _str_field("Commit message."),
-                },
-                "required": ["host", "project_root", "diff", "commit_message"],
-            },
-            tier=Tier.PROJECT,
-            fn=_apply_diff_remote,
-        ),
-        "register_project": Tool(
-            name="register_project",
-            description=(
-                "Create or update a project record on the hub. CALL THIS "
-                "when the user wants to set up a new project ('make a "
-                "project for the scRNA-seq work', 'register a project "
-                "called …'). Pair with add_project_location to attach "
-                "the (host, path) pairs the project spans."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "id": _str_field("Stable slug."),
-                    "name": _str_field("Human-readable name (defaults to id)."),
-                },
-                "required": ["id"],
-            },
-            tier=Tier.SAFE,
-            fn=_register_project,
-        ),
-        "add_project_location": Tool(
-            name="add_project_location",
-            description=(
-                "Attach a (host, path) location to a project. CALL THIS "
-                "whenever the user describes where a project lives — "
-                "phrases like 'data is on the GPU workstation at /data/x', "
-                "'location = workstation /scratch/y', 'the laptop has the "
-                "notebooks under …', or 'add another location for this "
-                "project'. The host argument is a satellite host_id from "
-                "the enrolled-hosts registry (see `baird satellite list`); "
-                "the path is the absolute path on that satellite. Do NOT "
-                "instead propose a diff against project.yaml — locations "
-                "live on the hub and only this tool persists them."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "project_id": _str_field("Project id."),
-                    "host": _str_field("Satellite host_id."),
-                    "path": _str_field("Absolute path on the satellite."),
-                    "role": _str_field("Optional role tag (data | compute | notebook | repo)."),
-                },
-                "required": ["project_id", "host", "path"],
-            },
-            tier=Tier.SAFE,
-            fn=_add_project_location,
-        ),
-        "list_projects": Tool(
-            name="list_projects",
-            description="List all projects registered with BAIRD on the hub.",
-            parameters={
-                "type": "object",
-                "properties": {},
-            },
-            tier=Tier.SAFE,
-            fn=_list_projects,
-        ),
-        "list_project_locations": Tool(
-            name="list_project_locations",
-            description="List all (host, path) locations for a project.",
-            parameters={
-                "type": "object",
-                "properties": {"project_id": _str_field("Project id.")},
-                "required": ["project_id"],
-            },
-            tier=Tier.SAFE,
-            fn=_list_project_locations,
-        ),
-        "set_watch_root": Tool(
-            name="set_watch_root",
-            description=(
-                "Edit a satellite's host.yaml `watch.roots` to point at a path "
-                "and restart its baird-daemon user unit. Tier 2 — autorun with warning."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "host": _str_field("Satellite host_id."),
-                    "path": _str_field("New watch root on the satellite."),
-                },
-                "required": ["host", "path"],
-            },
-            tier=Tier.PROJECT,
-            fn=_set_watch_root,
-        ),
-        "install_env": Tool(
-            name="install_env",
-            description=(
-                "Install an environment spec on a satellite (conda env file or pip "
-                "requirements). Tier 3 — always prompts before running."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "host": _str_field("Satellite host_id."),
-                    "project_id": _str_field("Project id for provenance."),
-                    "env_spec": _str_field("environment.yml body OR pip requirements list."),
-                },
-                "required": ["host", "project_id", "env_spec"],
-            },
-            tier=Tier.DESTRUCTIVE,
-            fn=_install_env,
-        ),
-        "where": Tool(
-            name="where",
-            description=(
-                "Resolve a data alias or path fragment against the active project's "
-                "locations and data_aliases — and across its parent + sibling "
-                "projects when the project sits under an umbrella (one-level "
-                "hierarchy). CALL THIS when the user asks 'where is X', 'which "
-                "host has the …', or references data from a sibling assay "
-                "('the scRNA cohort', 'the spatial counts'). The `project_id` "
-                "field on each hit names the family member the data came from."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": _str_field("Free-text query (alias name or path fragment)."),
-                    "project_id": _str_field("Project id; defaults to the active one."),
-                },
-                "required": ["query"],
-            },
-            tier=Tier.SAFE,
-            fn=_where,
-        ),
-        "list_siblings": Tool(
-            name="list_siblings",
-            description=(
-                "List sibling project ids — other children of the same parent. "
-                "CALL THIS when the user references another assay in the same "
-                "research programme ('what other assays are under umbrella programme?', "
-                "'list the other cohorts'), or when you need to know which "
-                "family members `where` would search. Empty list for top-level "
-                "projects (no parent → no siblings)."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "project_id": _str_field("Project id; defaults to the active one."),
-                },
-                "required": [],
-            },
-            tier=Tier.SAFE,
-            fn=_list_siblings,
-        ),
-    }
+    """Return the full tool registry (backwards-compat alias)."""
+    return build_default_catalogue()
 
 
 # ---- Dispatcher -------------------------------------------------------
