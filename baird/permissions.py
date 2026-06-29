@@ -71,23 +71,61 @@ class Policy:
 def default_policy() -> Policy:
     return Policy(
         safe_commands=[
+            # Listing / navigation
             r"^\s*ls(\s|$)",
             r"^\s*pwd(\s|$)",
+            r"^\s*tree(\s|$)",
+            r"^\s*find\s",
+            r"^\s*locate\s",
+            r"^\s*realpath(\s|$)",
+            r"^\s*readlink(\s|$)",
+            r"^\s*basename(\s|$)",
+            r"^\s*dirname(\s|$)",
+            r"^\s*stat(\s|$)",
+            # Reading file contents
             r"^\s*cat\s",
             r"^\s*head\s",
             r"^\s*tail\s",
+            r"^\s*less(\s|$)",
+            r"^\s*more(\s|$)",
             r"^\s*wc\s",
-            r"^\s*grep\s",
-            r"^\s*rg\s",
-            r"^\s*find\s",
             r"^\s*file\s",
+            r"^\s*md5sum\s",
+            r"^\s*sha\d+sum\s",
+            # Pattern matching (read-only when piped, but `grep -r` etc. are
+            # still read-only by themselves)
+            r"^\s*grep\s",
+            r"^\s*egrep\s",
+            r"^\s*fgrep\s",
+            r"^\s*rg\s",
+            r"^\s*ack\s",
+            # Host / environment introspection
             r"^\s*echo\s",
-            r"^\s*git\s+(status|log|diff|show|branch|remote|config\s+--get)",
-            r"^\s*tree(\s|$)",
+            r"^\s*hostname(\s|$)",
+            r"^\s*whoami(\s|$)",
+            r"^\s*id(\s|$)",
+            r"^\s*groups(\s|$)",
+            r"^\s*uname(\s|$)",
+            r"^\s*uptime(\s|$)",
+            r"^\s*date(\s|$)",
+            r"^\s*env(\s|$)",
+            r"^\s*printenv(\s|$)",
             r"^\s*which\s",
             r"^\s*type\s",
+            r"^\s*command\s+-v\s",
+            # Disk / process info (read-only)
+            r"^\s*df(\s|$)",
+            r"^\s*du(\s|$)",
+            r"^\s*ps(\s|$)",
+            r"^\s*free(\s|$)",
+            r"^\s*top\s+-bn1\b",
+            r"^\s*nproc(\s|$)",
+            # Git, read-only subcommands
+            r"^\s*git\s+(status|log|diff|show|branch|remote|config\s+--get|ls-files|rev-parse|describe|blame|reflog)",
+            # Conda / mamba env inspection
             r"^\s*conda\s+(env\s+list|list|info)",
             r"^\s*mamba\s+(env\s+list|list|info)",
+            # Common bioinformatics probes
             r"^\s*samtools\s+view\s+-H",
             r"^\s*samtools\s+(idxstats|flagstat|stats)",
             r"^\s*bcftools\s+(stats|view\s+-h)",

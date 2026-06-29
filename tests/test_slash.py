@@ -666,3 +666,117 @@ def test_audit_satellite_registered_in_commands() -> None:
     from baird.slash import commands
 
     assert "audit-satellite" in commands()
+
+
+# ---- /satellite enroll | list | remove --------------------------------
+
+
+def test_satellite_commands_registered() -> None:
+    from baird.slash import commands
+
+    cmds = commands()
+    assert "satellite enroll" in cmds
+    assert "satellite list" in cmds
+    assert "satellite remove" in cmds
+
+
+def test_satellite_list_renders_registry(monkeypatch) -> None:
+    """`/satellite list` formats the registry, no SSH involved."""
+    import baird.satellite as satmod
+
+    monkeypatch.setattr(satmod, "load_registry", lambda: {
+        "workstation": {"ssh_host": "workstation", "local_fwd_port": 8766},
+        "gpu": {"ssh_host": "gpu", "local_fwd_port": 8767},
+    })
+    monkeypatch.setattr(satmod, "tunnel_status", lambda _h: "active")
+    ctx, _, _ = _ctx(answers=[])
+    r = try_dispatch("satellite list", ctx)
+    assert r.handled and r.ok
+    assert "workstation" in r.output and "gpu" in r.output
+    assert "8766" in r.output and "active" in r.output
+
+
+def test_satellite_remove_drops_entry(monkeypatch) -> None:
+    """`/satellite remove host_id` calls save_registry without the entry."""
+    import baird.satellite as satmod
+
+    state = {"workstation": {"ssh_host": "workstation", "local_fwd_port": 8766}}
+    monkeypatch.setattr(satmod, "load_registry", lambda: dict(state))
+    saved = {}
+    monkeypatch.setattr(
+        satmod, "save_registry", lambda reg: saved.update({"reg": reg})
+    )
+    ctx, _, _ = _ctx(answers=[])
+    r = try_dispatch("satellite remove workstation", ctx)
+    assert r.handled and r.ok
+    assert "workstation" not in saved["reg"]
+
+
+def test_satellite_remove_rejects_unknown(monkeypatch) -> None:
+    import baird.satellite as satmod
+
+    monkeypatch.setattr(satmod, "load_registry", lambda: {"workstation": {}})
+    monkeypatch.setattr(satmod, "save_registry", lambda _r: None)
+    ctx, _, _ = _ctx(answers=[])
+    r = try_dispatch("satellite remove nope", ctx)
+    assert r.handled and not r.ok
+    assert "no satellite" in r.output
+
+
+def test_satellite_enroll_invokes_enroll_and_returns_ok(monkeypatch) -> None:
+    """`/satellite enroll <ssh-host>` calls baird.satellite.enroll and
+    surfaces the result. We stub enroll itself so no SSH happens."""
+    import baird.satellite as satmod
+
+    called = {}
+
+    def _fake_enroll_spec_from_local(ssh_host, *, host_id=None, git_ref="main"):
+        called["spec"] = (ssh_host, host_id, git_ref)
+        resolved_id = host_id or ssh_host
+        spec = type("_S", (), {})()
+        spec.host_id = resolved_id
+        spec.ssh_host = ssh_host
+        spec.local_fwd_port = None
+        spec.remote_watch_root = None
+        spec.use_hub_for_models = True
+        return spec
+
+    class _Res:
+        host_id = "workstation"
+        ssh_host = "workstation"
+        remote_home = "/home/u"
+        local_fwd_port = 8769
+        health_ok = True
+        detail = ""
+
+    monkeypatch.setattr(satmod, "enroll_spec_from_local", _fake_enroll_spec_from_local)
+    monkeypatch.setattr(satmod, "enroll", lambda _s: _Res())
+
+    ctx, _, _ = _ctx(answers=[])
+    r = try_dispatch("satellite enroll workstation", ctx)
+    assert r.handled and r.ok, r.output
+    assert "enrolled" in r.output and "workstation" in r.output
+    assert r.active_host == "workstation"
+    assert called["spec"] == ("workstation", None, "main")
+
+
+def test_satellite_enroll_reports_failure(monkeypatch) -> None:
+    import baird.satellite as satmod
+
+    class _Res:
+        ssh_host = "x"
+        remote_home = ""
+        local_fwd_port = None
+        health_ok = False
+        detail = "ssh: connect failed"
+
+    monkeypatch.setattr(
+        satmod, "enroll_spec_from_local",
+        lambda h, **kw: type("S", (), {"host_id": h, "use_hub_for_models": True})(),
+    )
+    monkeypatch.setattr(satmod, "enroll", lambda _s: _Res())
+
+    ctx, _, _ = _ctx(answers=[])
+    r = try_dispatch("satellite enroll bad-host", ctx)
+    assert r.handled and not r.ok
+    assert "ssh: connect failed" in r.output
