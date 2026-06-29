@@ -897,12 +897,10 @@ def update(
                 console.print(f"[cyan]restarting daemon on {host_id}…[/cyan]")
                 uv_bin = "\"$HOME/.local/bin/uv\""
                 restart_script = (
-                    "systemctl --user stop baird-daemon.service 2>/dev/null; "
-                    "systemctl --user kill baird-daemon.service 2>/dev/null; "
-                    "systemctl --user reset-failed baird-daemon.service 2>/dev/null; "
-                    "cd /tmp && nohup env PATH=\"$HOME/.local/bin:$PATH\" "
+                    "cd /tmp && "
+                    "env PATH=\"$HOME/.local/bin:$PATH\" "
                     "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
-                    ">/tmp/baird-daemon.log 2>&1 & "
+                    "</dev/null >/tmp/baird-daemon.log 2>&1 & "
                     "echo restart_ok"
                 )
                 r2 = _subprocess.run(
