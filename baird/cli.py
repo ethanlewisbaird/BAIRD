@@ -880,7 +880,9 @@ def update(
                 remote_dir = entry.get("remote_baird_dir", "$HOME/code/BAIRD")
                 console.print(f"[cyan]updating {host_id} ({ssh_host})…[/cyan]")
                 pull_script = (
-                    f"cd {remote_dir} && git pull 2>&1"
+                    f"cd {remote_dir} && "
+                    "git fetch origin main 2>&1 && "
+                    "git reset --hard origin/main 2>&1"
                 )
                 r = _subprocess.run(
                     ["ssh", ssh_host, pull_script],
@@ -893,16 +895,19 @@ def update(
                     for line in lines:
                         console.print(f"  {line}")
                 console.print(f"[cyan]restarting daemon on {host_id}…[/cyan]")
+                uv_bin = "\"$HOME/.local/bin/uv\""
                 restart_script = (
-                    "if systemctl --user list-units --all 2>/dev/null "
-                    "| grep -q baird-daemon; then "
-                    "systemctl --user restart baird-daemon 2>&1 || true; "
-                    "else "
-                    "pkill -f 'baird.cli daemon' 2>/dev/null || true; "
-                    "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
-                    "uv run python -m baird.cli daemon "
-                    ">/tmp/baird-daemon.log 2>&1 & "
-                    "fi && echo restart_ok"
+                    "systemctl --user stop baird-daemon.service 2>/dev/null || true; "
+                    "systemctl --user reset-failed baird-daemon.service 2>/dev/null || true; "
+                    f"systemd-run --user --unit=baird-daemon "
+                    f"-p WorkingDirectory={remote_dir} "
+                    f"{uv_bin} run python -m baird.daemon 2>&1 || "
+                    "("
+                    "pkill -f 'baird.*daemon' 2>/dev/null || true; "
+                    "cd /tmp && nohup env PATH=\"$HOME/.local/bin:$PATH\" "
+                    "uv run python -m baird.daemon "
+                    ">/tmp/baird-daemon.log 2>&1 &"
+                    ") && echo restart_ok"
                 )
                 r2 = _subprocess.run(
                     ["ssh", ssh_host, restart_script],
