@@ -879,24 +879,37 @@ def update(
                 ssh_host = entry.get("ssh_host", host_id)
                 remote_dir = entry.get("remote_baird_dir", "$HOME/code/BAIRD")
                 console.print(f"[cyan]updating {host_id} ({ssh_host})…[/cyan]")
-                script = (
-                    f"cd {remote_dir} && git pull && "
+                pull_script = (
+                    f"cd {remote_dir} && git pull 2>&1"
+                )
+                r = _subprocess.run(
+                    ["ssh", ssh_host, pull_script],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if r.returncode != 0:
+                    console.print(f"[red]{host_id} git pull failed[/red]\n{r.stdout[:500]}")
+                else:
+                    lines = [l for l in r.stdout.splitlines() if l.strip()]
+                    for line in lines:
+                        console.print(f"  {line}")
+                console.print(f"[cyan]restarting daemon on {host_id}…[/cyan]")
+                restart_script = (
                     "if systemctl --user list-units --all 2>/dev/null "
                     "| grep -q baird-daemon; then "
-                    "systemctl --user restart baird-daemon; "
+                    "systemctl --user restart baird-daemon 2>&1 || true; "
                     "else "
-                    "pkill -f 'baird.cli daemon' 2>/dev/null; "
+                    "pkill -f 'baird.cli daemon' 2>/dev/null || true; "
                     "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
                     "uv run python -m baird.cli daemon "
                     ">/tmp/baird-daemon.log 2>&1 & "
-                    "fi"
+                    "fi && echo restart_ok"
                 )
-                r = _subprocess.run(
-                    ["ssh", ssh_host, script],
-                    capture_output=True, text=True, timeout=120,
+                r2 = _subprocess.run(
+                    ["ssh", ssh_host, restart_script],
+                    capture_output=True, text=True, timeout=30,
                 )
-                if r.returncode != 0:
-                    console.print(f"[red]{host_id} update failed[/red]\n{r.stderr[:500]}")
+                if r2.returncode != 0:
+                    console.print(f"[red]{host_id} restart failed[/red]\n{r2.stderr[:200] or r2.stdout[:200]}")
                 else:
                     console.print(f"[green]{host_id} updated[/green]")
 
