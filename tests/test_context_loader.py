@@ -82,3 +82,59 @@ def test_tree_collapses_large_dirs(tmp_path: Path) -> None:
         (big / f"f{i}").write_text("x")
     out = _build_tree(tmp_path)
     assert "collapsed" in out
+
+
+def test_action_summaries_filter_out_model_turns(project: Path) -> None:
+    """Regression: prior REPL turns (tool_name='model') must NOT be re-injected
+    as recent-action-summary bullets. They're already in session history, and
+    rendering them into the system prompt causes self-mimicry — the model sees
+    its own past responses (including any text-shaped tool-call attempts) and
+    copies the pattern.
+
+    Real command/tool actions (tool_name != 'model') still appear."""
+
+    class _Hub:
+        def list_decisions(self, *a, **kw): return []
+        def list_actions(self, *, project_id, limit):
+            return [
+                {
+                    "id": "a1", "tool_name": "model",
+                    "summary": "The run_on tool is failing with a connection error",
+                },
+                {
+                    "id": "a2", "tool_name": "samtools",
+                    "summary": "samtools flagstat finished, mapped=92.3%",
+                },
+                {
+                    "id": "a3", "tool_name": "model",
+                    "summary": "I'll start by checking what's already registered",
+                },
+            ]
+
+    ctx = load_repo_context(project, hub=_Hub())
+    rendered = render_context(ctx)
+    assert "samtools flagstat finished" in rendered
+    assert "run_on tool is failing" not in rendered
+    assert "I'll start by checking" not in rendered
+
+
+def test_lite_repo_context_also_filters_model_turns() -> None:
+    """The lite_repo_context path (no checkout — scratch project, /project
+    switch) must filter the same way."""
+    from baird.context_loader import lite_repo_context, render_context
+    from baird.project_yaml import ProjectYaml
+
+    class _Hub:
+        def list_decisions(self, *a, **kw): return []
+        def list_actions(self, *, project_id, limit):
+            return [
+                {"id": "x", "tool_name": "model", "summary": "I'll start by ..."},
+                {"id": "y", "tool_name": "find", "summary": "found 17 dirs"},
+            ]
+
+    ctx = lite_repo_context(
+        ProjectYaml(id="p", name="p"), hub=_Hub(), host_id="surface"
+    )
+    rendered = render_context(ctx)
+    assert "found 17 dirs" in rendered
+    assert "I'll start by" not in rendered

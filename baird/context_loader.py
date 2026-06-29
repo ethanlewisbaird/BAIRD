@@ -250,7 +250,15 @@ def load_repo_context(
             decisions = []
         try:
             actions = hub.list_actions(project_id=project.id, limit=n_action_summaries * 3)
-            summaries = [a for a in actions if a.get("summary")][:n_action_summaries]
+            # Skip `tool_name=="model"` rows — those are first-line snippets of
+            # prior assistant turns. Re-injecting them into the system prompt
+            # causes self-mimicry loops (the model sees its own past responses,
+            # including text-shaped tool-call attempts, and copies the
+            # pattern). Real command/tool actions stay.
+            summaries = [
+                a for a in actions
+                if a.get("summary") and a.get("tool_name") != "model"
+            ][:n_action_summaries]
         except Exception:
             summaries = []
 
@@ -294,7 +302,15 @@ def lite_repo_context(
             decisions = []
         try:
             actions = hub.list_actions(project_id=project.id, limit=n_action_summaries * 3)
-            summaries = [a for a in actions if a.get("summary")][:n_action_summaries]
+            # Skip `tool_name=="model"` rows — those are first-line snippets of
+            # prior assistant turns. Re-injecting them into the system prompt
+            # causes self-mimicry loops (the model sees its own past responses,
+            # including text-shaped tool-call attempts, and copies the
+            # pattern). Real command/tool actions stay.
+            summaries = [
+                a for a in actions
+                if a.get("summary") and a.get("tool_name") != "model"
+            ][:n_action_summaries]
         except Exception:
             summaries = []
     return RepoContext(
