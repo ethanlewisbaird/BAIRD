@@ -47,6 +47,69 @@ def extract_diff_blocks(text: str) -> list[str]:
     return [m.group(1) for m in _DIFF_BLOCK_RE.finditer(text or "")]
 
 
+# Patterns we use to detect when a model has emitted a text-shaped tool call
+# instead of going through the OpenAI `tool_calls` channel. Seen with
+# owl-alpha (`<longcat_tool_call>...`) and various Claude/GPT fallbacks. When
+# this fires AND `completion.tool_calls` is empty, the agent loop nudges the
+# model back to structured mode and retries one round.
+_TEXT_TOOL_CALL_PATTERNS: tuple[str, ...] = (
+    r"<longcat_tool_call\b",
+    r"</longcat_tool_call\b",
+    r"<tool_call\b",
+    r"</tool_call\b",
+    r"<function_call\b",
+    r"</function_call\b",
+    r"```\s*tool_call\b",
+    r"```\s*function_call\b",
+)
+_TEXT_TOOL_CALL_RE = re.compile("|".join(_TEXT_TOOL_CALL_PATTERNS), re.IGNORECASE)
+
+
+def contains_text_tool_call(content: str | None) -> bool:
+    """True when `content` carries text-shaped tool-call markup that should
+    have come through the OpenAI `tool_calls` channel instead."""
+    if not content:
+        return False
+    return _TEXT_TOOL_CALL_RE.search(content) is not None
+
+
+# Strip patterns: cover paired tags, orphan opening tags, and fenced blocks.
+_STRIP_PATTERNS: tuple[tuple[str, int], ...] = (
+    (r"<longcat_tool_call\b.*?</longcat_tool_call\s*>", re.DOTALL | re.IGNORECASE),
+    (r"<tool_call\b.*?</tool_call\s*>", re.DOTALL | re.IGNORECASE),
+    (r"<function_call\b.*?</function_call\s*>", re.DOTALL | re.IGNORECASE),
+    (r"```\s*tool_call\b.*?```", re.DOTALL | re.IGNORECASE),
+    (r"```\s*function_call\b.*?```", re.DOTALL | re.IGNORECASE),
+    # Orphan opening tag → strip from there to end of message.
+    (r"<longcat_tool_call\b.*", re.DOTALL | re.IGNORECASE),
+    (r"<tool_call\b.*", re.DOTALL | re.IGNORECASE),
+    (r"<function_call\b.*", re.DOTALL | re.IGNORECASE),
+)
+
+
+def strip_text_tool_calls(content: str | None) -> str:
+    """Remove text-shaped tool-call markup from `content`.
+
+    Used when loading prior assistant messages into history — we don't want
+    the model to see its own (or a previous model's) text-tool-call attempts
+    and copy the pattern. Returns the stripped content (may be empty)."""
+    if not content:
+        return ""
+    out = content
+    for pat, flags in _STRIP_PATTERNS:
+        out = re.sub(pat, "", out, flags=flags)
+    return out.strip()
+
+
+_DRIFT_CORRECTION = (
+    "Your previous turn contained a text-shaped tool call (e.g. "
+    "<longcat_tool_call>... or a tool_call fenced block) but the function-"
+    "calling channel is the only path that actually executes a tool. Retry "
+    "the same intent using the structured tool_calls API — do not include "
+    "tool-call markup in the message body."
+)
+
+
 HISTORY_TURN_CAP = 20  # last N messages sent to the model on each turn
 
 
@@ -494,6 +557,7 @@ def _one_turn(
         total_input = 0
         total_output = 0
         completion: Completion | None = None
+        _drift_corrected = False
 
         for round_idx in range(MAX_AGENT_ROUNDS):
             # Stream only on what we *think* is the final round; if it turns
@@ -517,6 +581,29 @@ def _one_turn(
             total_output += completion.usage.output_tokens
 
             if not completion.tool_calls:
+                # Self-healing: if the model emitted text-shaped tool-call
+                # markup but didn't go through the structured channel, nudge
+                # it back once and retry. This catches model drift (owl-alpha
+                # has a known fallback to `<longcat_tool_call>...`) and
+                # poisoned histories that escaped the load-side strip.
+                if (
+                    contains_text_tool_call(completion.content)
+                    and not _drift_corrected
+                ):
+                    if on_tool_event:
+                        on_tool_event(
+                            "drift",
+                            "text-shaped tool call detected — nudging model back "
+                            "to the function-calling channel and retrying",
+                        )
+                    msgs.append({
+                        "role": "assistant",
+                        "content": strip_text_tool_calls(completion.content)
+                                   or "(text-shaped tool call removed)",
+                    })
+                    msgs.append({"role": "system", "content": _DRIFT_CORRECTION})
+                    _drift_corrected = True
+                    continue
                 # Final turn — stream the content for the caller if requested
                 # and we haven't already.
                 if on_chunk is not None and not use_stream and completion.content:

@@ -486,6 +486,154 @@ def test_completion_parses_tool_calls() -> None:
     assert c.tool_calls[0]["arguments"] == {"host": "workstation", "command": "ls"}
 
 
+def test_contains_text_tool_call_detects_known_patterns() -> None:
+    from baird.repl import contains_text_tool_call
+
+    assert contains_text_tool_call("foo <longcat_tool_call>run_on</longcat_tool_call>")
+    assert contains_text_tool_call("<tool_call>x</tool_call>")
+    assert contains_text_tool_call("<function_call>y")
+    assert contains_text_tool_call("```tool_call\n{}\n```")
+    assert not contains_text_tool_call("just plain text")
+    assert not contains_text_tool_call("")
+    assert not contains_text_tool_call(None)
+
+
+def test_strip_text_tool_calls_removes_markup_keeps_prose() -> None:
+    from baird.repl import strip_text_tool_calls
+
+    s = (
+        "Let me check that.\n"
+        "<longcat_tool_call>run_on\n"
+        "<longcat_arg_key>host</longcat_arg_key>\n"
+        "<longcat_arg_value>workstation</longcat_arg_value>\n"
+        "</longcat_tool_call>\n"
+        "Trailing text."
+    )
+    out = strip_text_tool_calls(s)
+    assert "longcat_tool_call" not in out
+    assert "Let me check that." in out
+    assert "Trailing text." in out
+
+
+def test_strip_handles_orphan_opening_tag() -> None:
+    from baird.repl import strip_text_tool_calls
+
+    # owl-alpha sometimes emits an opening tag without a closing one
+    # (truncation, etc.). Strip from the tag onward.
+    s = "Doing things now.\n<longcat_tool_call>run_on\nhost=x\ncommand=ls"
+    out = strip_text_tool_calls(s)
+    assert "longcat_tool_call" not in out
+    assert "Doing things now." in out
+
+
+def test_repl_agent_loop_recovers_from_text_tool_call(
+    tmp_path: Path, client: TestClient
+) -> None:
+    """Self-healing: model emits text-shaped markup on round 1 (no structured
+    tool_calls). Agent loop detects, appends a corrective system message,
+    retries once. Round 2 returns a real structured tool_call → dispatch.
+    Round 3 returns final content."""
+    hub = _Hub(client)
+    hub.upsert_project(id="p-drift", name="p-drift")
+
+    round_n = {"i": 0}
+    transport_calls: list[dict] = []
+    def _t(req):
+        transport_calls.append(req)
+        round_n["i"] += 1
+        if round_n["i"] == 1:
+            # Text-shaped tool call — should NOT count as structured.
+            return {
+                "choices": [{
+                    "message": {
+                        "content": (
+                            "I'll list things.\n"
+                            "<longcat_tool_call>where\n"
+                            "<longcat_arg_key>query</longcat_arg_key>\n"
+                            "<longcat_arg_value>x</longcat_arg_value>\n"
+                            "</longcat_tool_call>"
+                        ),
+                    },
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.0001},
+            }
+        if round_n["i"] == 2:
+            # After the nudge, model goes structured.
+            return {
+                "choices": [{
+                    "message": {
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "fix1", "type": "function",
+                            "function": {"name": "where",
+                                         "arguments": '{"query": "x"}'},
+                        }],
+                    },
+                }],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 6, "cost": 0.0001},
+            }
+        return {
+            "choices": [{"message": {"content": "final result"}}],
+            "usage": {"prompt_tokens": 14, "completion_tokens": 7, "cost": 0.0001},
+        }
+
+    console = Console(record=True, width=160)
+    stats = run_repl(
+        repo_ctx=_ctx(tmp_path),
+        hub=hub,
+        model_client=OpenRouterClient(transport=_t),
+        config=ReplConfig(project_id="p-drift"),
+        console=console,
+        inputs=["go", "/exit"],
+    )
+
+    assert stats.turns == 1
+    # Round 1 = text drift, round 2 = structured tool call, round 3 = final.
+    assert round_n["i"] == 3
+    # Round 2 request must contain the drift-correction system message.
+    round2_msgs = transport_calls[1]["body"]["messages"]
+    assert any(
+        m.get("role") == "system" and "function-calling channel" in (m.get("content") or "")
+        for m in round2_msgs
+    )
+    out = console.export_text()
+    assert "final result" in out
+
+
+def test_history_loader_strips_text_tool_calls_from_assistant(
+    client: TestClient,
+) -> None:
+    """A previously-poisoned session can self-recover without /reset because
+    `load_history_with_summary` strips text-tool-call markup from prior
+    assistant messages before sending them back to the model."""
+    from baird.context_compressor import load_history_with_summary
+
+    hub = _Hub(client)
+    sess = hub.find_or_create_session_for_task(
+        task_id="t-drift", project_id="p-loader", mode="code"
+    )
+    sid = sess["id"]
+    hub.append_message(sid, role="user", content="please list things")
+    hub.append_message(
+        sid, role="assistant",
+        content="Sure.\n<longcat_tool_call>where\n"
+                "<longcat_arg_key>q</longcat_arg_key>\n"
+                "<longcat_arg_value>x</longcat_arg_value>\n"
+                "</longcat_tool_call>",
+    )
+
+    out = load_history_with_summary(
+        hub, session_id=sid, cap=20,
+        model_client=OpenRouterClient(transport=lambda r: {
+            "choices": [{"message": {"content": ""}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0},
+        }),
+    )
+    assistant_msg = next(m for m in out if m["role"] == "assistant")
+    assert "longcat_tool_call" not in assistant_msg["content"]
+    assert "Sure." in assistant_msg["content"]
+
+
 def test_repl_records_action_per_turn(tmp_path: Path, client: TestClient) -> None:
     hub = _Hub(client)
     console = Console(record=True, width=120)
