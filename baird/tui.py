@@ -192,10 +192,10 @@ def run_tui_repl(
                 f"session {session_id} not found for project {config.project_id}"
             )
     else:
-        session = hub.find_or_create_session_for_task(
+        session = hub.new_session(
+            mode="code",
             task_id=f"repl-{config.project_id}",
             project_id=config.project_id,
-            mode="code",
         )
 
     iterator: Iterable[str] | None = iter(inputs) if inputs is not None else None
