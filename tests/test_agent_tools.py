@@ -380,12 +380,33 @@ def test_list_siblings_description_includes_use_case() -> None:
     )
 
 
-def test_system_prompt_embeds_tool_catalogue() -> None:
+def test_system_prompt_no_longer_inlines_tool_catalogue() -> None:
+    """Tools are now advertised via the OpenAI `tools=[...]` schema on the
+    request, not as prose in the system message — duplicating them tempts
+    function-calling models to emit text-shaped tool calls. The system text
+    only carries the rendered project context + a brief steer toward the
+    structured channel."""
     from baird.repl import _system_prompt
 
     sp = _system_prompt("## ctx\n\nminimal.")
-    assert "Available hub tools" in sp
-    assert "add_project_location" in sp
-    assert "register_project" in sp
-    # New family-aware tool is advertised too.
-    assert "list_siblings" in sp
+    # No verbose catalogue dump:
+    assert "Available hub tools" not in sp
+    assert "list_siblings" not in sp
+    # But the context is preserved:
+    assert "minimal." in sp
+    # And we still point the model at the function-calling channel:
+    assert "function-calling tools" in sp
+
+
+def test_tools_openai_schema_round_trip() -> None:
+    """The catalogue must render as a list of OpenAI function-call entries."""
+    from baird.agent_tools import build_catalogue, tools_openai_schema
+
+    schema = tools_openai_schema()
+    cat = build_catalogue()
+    assert {entry["function"]["name"] for entry in schema} == set(cat.keys())
+    for entry in schema:
+        assert entry["type"] == "function"
+        fn = entry["function"]
+        assert isinstance(fn["description"], str) and fn["description"]
+        assert fn["parameters"]["type"] == "object"

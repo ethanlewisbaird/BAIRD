@@ -70,18 +70,24 @@ class ReplConfig:
 
 
 def _system_prompt(rendered_context: str) -> str:
-    from .agent_tools import tool_catalogue_prompt
+    """Compose the per-turn system prompt.
 
+    Tools are advertised via the OpenAI `tools=[...]` schema on the request,
+    not in the system text — duplicating them as prose competes with the
+    structured channel and tempts function-calling models to emit text-shaped
+    calls instead of native tool_calls. We just remind the model to use the
+    function-calling channel when changing hub-owned state.
+    """
     return (
-        "You are BAIRD, a bioinformatics research assistant. The active project's "
-        "context follows. Be concise; when proposing code, give the change as a "
-        "fenced unified diff so it can be reviewed and applied. For changes to "
-        "hub-owned state (project locations, decisions, environment installs, "
-        "satellite host.yaml) call the matching tool below instead of writing a "
-        "diff.\n\n"
+        "You are BAIRD, a bioinformatics research assistant. The active "
+        "project's context follows. Be concise; when proposing code, give "
+        "the change as a fenced unified diff so it can be reviewed and "
+        "applied. For changes to hub-owned state (project locations, "
+        "decisions, environment installs, satellite host.yaml) and for "
+        "anything that needs to read files or run commands on a satellite, "
+        "use the function-calling tools provided — do not invent your own "
+        "tool-call syntax in the message body.\n\n"
         + rendered_context
-        + "\n\n"
-        + tool_catalogue_prompt()
     )
 
 
