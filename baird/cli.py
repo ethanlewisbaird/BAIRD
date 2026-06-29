@@ -897,15 +897,16 @@ def update(
                 console.print(f"[cyan]restarting daemon on {host_id}…[/cyan]")
                 uv_bin = "\"$HOME/.local/bin/uv\""
                 restart_script = (
+                    "pkill -f 'baird.*daemon' 2>/dev/null || true; "
+                    "sleep 0.5; "
                     "systemctl --user stop baird-daemon.service 2>/dev/null || true; "
                     "systemctl --user reset-failed baird-daemon.service 2>/dev/null || true; "
                     f"systemd-run --user --unit=baird-daemon "
                     f"-p WorkingDirectory={remote_dir} "
                     f"{uv_bin} run python -m baird.daemon 2>&1 || "
                     "("
-                    "pkill -f 'baird.*daemon' 2>/dev/null || true; "
                     "cd /tmp && nohup env PATH=\"$HOME/.local/bin:$PATH\" "
-                    "uv run python -m baird.daemon "
+                    "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
                     ">/tmp/baird-daemon.log 2>&1 &"
                     ") && echo restart_ok"
                 )
