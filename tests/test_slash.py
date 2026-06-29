@@ -655,11 +655,11 @@ def test_audit_satellite_depth_kwarg_clamped() -> None:
 
 
 def test_audit_satellite_depth_default_three() -> None:
-    """No depth specified → depth=3 is mentioned in the find command hint."""
+    """No depth specified → depth=3 is mentioned in the prompt."""
     ctx, hub, _ = _ctx(answers=[])
     r = try_dispatch("audit-satellite workstation /data", ctx)
     assert r.handled and r.ok
-    assert "-maxdepth 3" in (r.next_user_prompt or "")
+    assert "max-depth 3" in (r.next_user_prompt or "")
 
 
 def test_audit_satellite_registered_in_commands() -> None:
