@@ -69,10 +69,7 @@ def load_history_with_summary(
         if len(chunk) < page:
             break
     if len(all_msgs) <= cap:
-        return [
-            {"role": m["role"], "content": m["content"]}
-            for m in all_msgs
-        ]
+        return [_sanitised(m) for m in all_msgs]
 
     older = all_msgs[: len(all_msgs) - cap]
     recent = all_msgs[len(all_msgs) - cap :]
@@ -83,7 +80,7 @@ def load_history_with_summary(
         try:
             summary = _summarise_messages(
                 model_client,
-                [{"role": m["role"], "content": m["content"]} for m in older],
+                [_sanitised(m) for m in older],
                 model=summary_model,
             )
         except Exception:
@@ -98,8 +95,24 @@ def load_history_with_summary(
             "role": "system",
             "content": f"[previous conversation summary]\n{summary}",
         })
-    head.extend({"role": m["role"], "content": m["content"]} for m in recent)
+    head.extend(_sanitised(m) for m in recent)
     return head
+
+
+def _sanitised(msg: dict[str, Any]) -> dict[str, Any]:
+    """Project a stored Message down to the shape the model expects, and
+    strip any text-shaped tool-call markup from assistant content so the
+    model doesn't see (and mimic) its own past failed attempts."""
+    from .repl import contains_text_tool_call, strip_text_tool_calls
+
+    content = msg.get("content") or ""
+    if msg.get("role") == "assistant" and content and contains_text_tool_call(content):
+        stripped = strip_text_tool_calls(content)
+        # If the stripped content is empty, keep a marker so the conversation
+        # turn shape stays valid (some providers reject empty-content messages)
+        # without re-exposing the original markup.
+        content = stripped or "(text-shaped tool call removed from history)"
+    return {"role": msg["role"], "content": content}
 
 
 def clear_cache() -> None:
