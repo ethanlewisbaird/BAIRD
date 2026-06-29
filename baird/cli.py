@@ -903,14 +903,17 @@ def update(
                     "</dev/null >/tmp/baird-daemon.log 2>&1 & "
                     "disown; echo restart_ok"
                 )
-                r2 = _subprocess.run(
-                    ["ssh", ssh_host, restart_script],
-                    capture_output=True, text=True, timeout=30,
-                )
-                if r2.returncode != 0:
-                    console.print(f"[red]{host_id} restart failed[/red]\n{r2.stderr[:200] or r2.stdout[:200]}")
-                else:
-                    console.print(f"[green]{host_id} updated[/green]")
+                try:
+                    r2 = _subprocess.run(
+                        ["ssh", ssh_host, restart_script],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    if r2.returncode != 0:
+                        console.print(f"[yellow]{host_id} restart failed[/yellow]\n{r2.stderr[:200] or r2.stdout[:200]}")
+                    else:
+                        console.print(f"[green]{host_id} updated[/green]")
+                except Exception:
+                    console.print(f"[yellow]{host_id} restart skipped (ssh timed out)[/yellow]")
 
     # 3. Restart local hub (+ daemon) with new code
     if not sat_only:
