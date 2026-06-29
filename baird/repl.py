@@ -102,11 +102,13 @@ def strip_text_tool_calls(content: str | None) -> str:
 
 
 _TEXT_TOOL_CALL_BLOCK = re.compile(
-    r"<longcat_tool_call\b([^>]*)>(.*?)</longcat_tool_call\s*>",
+    r"<longcat_tool_call\b[^>]*>(.*?)</longcat_tool_call\s*>",
     re.DOTALL | re.IGNORECASE,
 )
-_TEXT_TOOL_ARG = re.compile(
-    r"<longcat_arg_key\b([^>]*)>(.*?)</longcat_arg_key\s*>",
+_KEY_VAL_PAIRS = re.compile(
+    r"<longcat_arg_key\b[^>]*>(.*?)</longcat_arg_key\s*>"
+    r"\s*"
+    r"<longcat_arg_value\b[^>]*>(.*?)</longcat_arg_value\s*>",
     re.DOTALL | re.IGNORECASE,
 )
 
@@ -116,14 +118,12 @@ def parse_text_tool_calls(content: str) -> list[dict]:
     `{name, arguments}` dicts that the dispatch function can consume."""
     calls: list[dict] = []
     for block in _TEXT_TOOL_CALL_BLOCK.finditer(content):
-        tool_body = block.group(2).strip()
+        tool_body = block.group(1).strip()
         lines = tool_body.splitlines()
         name = lines[0].strip() if lines else ""
         args: dict[str, str] = {}
-        for arg_match in _TEXT_TOOL_ARG.finditer(tool_body):
-            key = arg_match.group(1).strip()
-            val = arg_match.group(2).strip()
-            args[key] = val
+        for k_match, v_match in _KEY_VAL_PAIRS.findall(tool_body):
+            args[k_match.strip()] = v_match.strip()
         if name:
             calls.append({"name": name, "arguments": args})
     return calls
