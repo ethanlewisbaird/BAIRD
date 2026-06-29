@@ -145,6 +145,10 @@ def _add_project_location(
     return env.hub.add_project_location(project_id, host=host, path=path, role=role)
 
 
+def _list_projects(env: ToolEnv) -> list[dict]:
+    return env.hub.list_projects()
+
+
 def _list_project_locations(env: ToolEnv, *, project_id: str) -> list[dict]:
     return env.hub.list_project_locations(project_id)
 
@@ -434,6 +438,16 @@ def build_catalogue() -> dict[str, Tool]:
             },
             tier=Tier.SAFE,
             fn=_add_project_location,
+        ),
+        "list_projects": Tool(
+            name="list_projects",
+            description="List all projects registered with BAIRD on the hub.",
+            parameters={
+                "type": "object",
+                "properties": {},
+            },
+            tier=Tier.SAFE,
+            fn=_list_projects,
         ),
         "list_project_locations": Tool(
             name="list_project_locations",
