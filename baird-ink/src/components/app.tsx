@@ -88,21 +88,11 @@ export function App() {
 
   // ── Centralized input handler ──
   useInput((_input, key) => {
-    // ── Always-on keyboard shortcuts ──
-    if (key.ctrl) {
-      if (_input === 's') { useUIStore.getState().toggleSidebar(); return; }
-      if (_input === 't') { useUIStore.getState().toggleTimestamps(); return; }
-      if (_input === 'e') { useUIStore.getState().toggleExpandAll(); return; }
-      if (_input === 'c') { process.exit(0); return; }
-      return;
-    }
-    if (key.pageUp) { useUIStore.getState().scrollUp(); return; }
-    if (key.pageDown) { useUIStore.getState().scrollDown(); return; }
-
-    // ── Dialog mode ──
+    // ── Dialog mode (takes priority so paste works) ──
     if (dialog) {
+      if (key.ctrl && _input === 'c') { process.exit(0); return; }
       if (key.escape) { useUIStore.getState().setDialog(null); return; }
-      // Choices-based dialog (provider selection, confirmations)
+      // Choices-based dialog
       if (dialog.choices.length > 0) {
         if (_input >= '1' && _input <= '9') {
           const idx = parseInt(_input, 10) - 1;
@@ -119,7 +109,7 @@ export function App() {
         }
         return;
       }
-      // Text-input dialog (API key entry, etc.)
+      // Text-input dialog
       if (key.return) {
         const text = inputRef.current.trim();
         if (text) {
@@ -133,12 +123,24 @@ export function App() {
         setInputValue((v) => v.slice(0, -1));
         return;
       }
+      // Accept any printable character (including during paste)
       if (_input.length === 1 && !key.ctrl && !key.meta) {
         setInputValue((v) => v + _input);
         return;
       }
       return;
     }
+
+    // ── Keyboard shortcuts (only when no dialog) ──
+    if (key.ctrl) {
+      if (_input === 's') { useUIStore.getState().toggleSidebar(); return; }
+      if (_input === 't') { useUIStore.getState().toggleTimestamps(); return; }
+      if (_input === 'e') { useUIStore.getState().toggleExpandAll(); return; }
+      if (_input === 'c') { process.exit(0); return; }
+      return;
+    }
+    if (key.pageUp) { useUIStore.getState().scrollUp(); return; }
+    if (key.pageDown) { useUIStore.getState().scrollDown(); return; }
 
     // ── Normal input mode ──
     if (key.return) {
