@@ -275,18 +275,26 @@ class OpenRouterClient:
                     # Tool-call deltas
                     for tc_delta in delta.get("tool_calls") or []:
                         idx = tc_delta.get("index", 0)
-                        acc = tool_call_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
+                        acc = tool_call_acc.setdefault(idx, {"id": "", "name": "", "args": "", "name_seen": False})
                         if tc_delta.get("id"):
                             acc["id"] = tc_delta["id"]
                         if tc_delta.get("function"):
                             fn = tc_delta["function"]
-                            if fn.get("name"):
+                            if fn.get("name") and not acc["name_seen"]:
                                 acc["name"] = fn["name"]
+                                acc["name_seen"] = True
+                                # Stream tool call LIVE as soon as the name arrives
+                                if on_chunk is not None:
+                                    on_chunk(_json.dumps({"tool_calls": [{
+                                        "id": acc["id"],
+                                        "type": "function",
+                                        "function": {"name": acc["name"], "arguments": ""},
+                                    }]}))
                             if fn.get("arguments"):
                                 acc["args"] += fn["arguments"]
         finally:
             pass
-        # Build tool_calls from accumulator
+        # Build tool_calls from accumulator (completion)
         tool_calls_out: list[dict[str, Any]] | None = None
         if tool_call_acc:
             tool_calls_out = []
@@ -301,9 +309,6 @@ class OpenRouterClient:
                     },
                 }
                 tool_calls_out.append(tc)
-                # Stream tool_calls to on_chunk as JSON so the TUI can see them
-                if on_chunk is not None:
-                    on_chunk(_json.dumps({"tool_calls": [tc]}))
         raw_like = {
             "choices": [{"message": {"content": "".join(content_parts)}}],
             "usage": usage or {},

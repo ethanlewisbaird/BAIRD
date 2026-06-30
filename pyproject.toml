@@ -23,6 +23,7 @@ dependencies = [
     "pyyaml>=6.0",
     "pathspec>=0.12",
     "croniter>=2.0",
+    "prompt-toolkit>=3.0.52",
 ]
 
 [project.optional-dependencies]

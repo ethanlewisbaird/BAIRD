@@ -34,6 +34,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.styles import Style as PtStyle
 from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
@@ -63,6 +69,49 @@ BRIT_WHITE = "#FFFFFF"
 BRIT_NAVY = "#0B1D3A"
 BRIT_DIM = "#6B7C93"
 BRIT_GREEN = "#228B22"
+
+
+# ── prompt_toolkit autocomplete ──────────────────────────────────────
+
+_SLASH_COMMANDS = [
+    "exit", "quit", "help", "context", "reset", "cost", "no-diff",
+    "model", "project", "project new", "project list",
+    "sessions", "undo", "redo",
+]
+
+
+class SlashCompleter(Completer):
+    """Autocomplete for slash commands and @-mentions."""
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        # Slash commands at start of input
+        if text.startswith("/") and " " not in text:
+            partial = text[1:].lower()
+            for cmd in _SLASH_COMMANDS:
+                if cmd.startswith(partial):
+                    yield Completion(f"/{cmd} ", start_position=-len(text))
+        # @-mentions
+        at_idx = text.rfind("@")
+        if at_idx >= 0 and " " not in text[at_idx:]:
+            partial = text[at_idx + 1:]
+            yield Completion(f"@{partial} ", start_position=-len(partial))
+
+
+def _make_pt_session() -> PromptSession:
+    """Create a prompt_toolkit session with history and autocomplete."""
+    hist_path = os.path.expanduser("~/.baird/repl_history")
+    os.makedirs(os.path.dirname(hist_path), exist_ok=True)
+    return PromptSession(
+        completer=SlashCompleter(),
+        auto_suggest=AutoSuggestFromHistory(),
+        history=FileHistory(hist_path),
+        style=PtStyle.from_dict({
+            "completion-menu.completion": "bg:#012169 #ffffff",
+            "completion-menu.completion.current": "bg:#C8102E #ffffff",
+            "completion-menu.meta.completion": "bg:#1D70B8 #ffffff",
+        }),
+    )
 
 
 def _tool_icon(name: str) -> str:
@@ -252,6 +301,8 @@ def run_tui_repl(
     agent_mode = getattr(config, "_agent_mode", AgentMode.BUILD)
 
     iterator: Iterable[str] | None = iter(inputs) if inputs is not None else None
+    _use_pt = iterator is None and os.isatty(0)
+    pt_session: PromptSession | None = _make_pt_session() if _use_pt else None
 
     def _print(line: Text | str) -> None:
         console.print(line)
@@ -262,6 +313,8 @@ def run_tui_repl(
                 return next(iterator)
             except StopIteration:
                 raise EOFError
+        if pt_session is not None:
+            return pt_session.prompt(prompt, vi_mode=True)
         return console.input(prompt)
 
     console.print(_render_header(repo_ctx, host_id, session, config))
