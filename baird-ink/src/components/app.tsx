@@ -91,9 +91,9 @@ export function App() {
     // ── Dialog mode (takes priority so paste works) ──
     if (dialog) {
       if (key.ctrl && _input === 'c') { process.exit(0); return; }
-      if (key.escape) { useUIStore.getState().setDialog(null); return; }
-      // Choices-based dialog
+      // Choices-based dialog (Escape dismisses)
       if (dialog.choices.length > 0) {
+        if (key.escape) { useUIStore.getState().setDialog(null); return; }
         if (_input >= '1' && _input <= '9') {
           const idx = parseInt(_input, 10) - 1;
           if (idx < dialog.choices.length) {
@@ -109,7 +109,7 @@ export function App() {
         }
         return;
       }
-      // Text-input dialog
+      // Text-input dialog (Escape ignored — bracketed paste conflict)
       if (key.return) {
         const text = inputRef.current.trim();
         if (text) {
