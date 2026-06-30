@@ -22,14 +22,21 @@ function projectRoot(): string {
   return resolve(dir, '../../..');
 }
 
+/** Parse BAIRD_PYTHON_CMD env var or default to 'uv run python'. */
+function pythonCommand(): [string, string[]] {
+  const raw = process.env.BAIRD_PYTHON_CMD || 'uv run python';
+  const parts = raw.trim().split(/\s+/);
+  return [parts[0] || 'python3', parts.slice(1)];
+}
+
 export function startBackend(
   adapterScript: string,
   onEvent: (event: BackendEvent) => void,
   onExit: (code: number | null) => void,
 ): BackendAdapter {
   const cwd = projectRoot();
-  const cmd = 'uv';
-  const cmdArgs = ['run', 'python', adapterScript];
+  const [cmd, pythonArgs] = pythonCommand();
+  const cmdArgs = [...pythonArgs, adapterScript];
 
   const proc: ChildProcess = spawn(cmd, cmdArgs, {
     cwd,

@@ -9,6 +9,9 @@ Coding mode, chat, and task execution still wait on later phases.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import typer
@@ -86,6 +89,39 @@ def _hub_client_from_host(auto_start: bool = True) -> HubClient:
 
 def _project_yaml_path(root: Path | None = None) -> Path:
     return (root or Path.cwd()) / ".baird" / "project.yaml"
+
+
+def _run_ink_tui(config) -> None:  # noqa: ANN001
+    """Spawn the Ink TUI frontend as a child process."""
+    ink_dir = Path(__file__).resolve().parent.parent / "baird-ink"
+    if not (ink_dir / "src" / "cli.tsx").exists():
+        console.print(f"[red]baird-ink frontend not found at {ink_dir}[/red]")
+        raise typer.Exit(1)
+
+    # Resolve the correct Python command (venv-aware)
+    python_cmd = os.environ.get("BAIRD_PYTHON_CMD") or sys.executable
+    if "uv" not in python_cmd:
+        try:
+            result = subprocess.run(
+                ["uv", "run", "which", "python"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                python_cmd = result.stdout.strip()
+        except Exception:
+            pass  # keep default
+
+    env = {
+        **os.environ,
+        "BAIRD_PYTHON_CMD": python_cmd,
+    }
+    result = subprocess.run(
+        ["npx", "--yes", "tsx", "src/cli.tsx"],
+        cwd=str(ink_dir),
+        env=env,
+    )
+    if result.returncode != 0:
+        console.print(f"[dim]ink TUI exited ({result.returncode})[/dim]")
 
 
 # ----- top-level callback -----
@@ -236,14 +272,12 @@ def code(
                 auth_token=host_cfg.effective_hub_token(),
             )
 
-    runner_fn = run_repl
     if tui:
-        from .tui import run_tui_repl
-
-        runner_fn = run_tui_repl
+        _run_ink_tui(config=ReplConfig(**repl_cfg_kwargs))
+        return
 
     with _hub_client_from_host() as hub:
-        runner_fn(
+        run_repl(
             repo_ctx=ctx,
             hub=hub,
             model_client=OpenRouterClient(transport=transport),
