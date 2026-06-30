@@ -1,23 +1,25 @@
-"""Rich Live + Layout TUI for `baird code`.
+"""OpenCode-style TUI for `baird code` — British-flag colour theme.
 
-Wraps the existing REPL semantics in a persistent layout:
+  ╭─ baird  project=…  host=…  branch=…  model=… ─────────────────╮
+  │                                                                 │
+  │  user> find large files in /data/ebaird                         │
+  │                                                                 │
+  │  $ find /data/ebaird -size +100M                                │
+  │  /data/ebaird/bigfile.bam                                       │
+  │                                                                 │
+  │  Found 1 file over 100MB in /data/ebaird: bigfile.bam           │
+  │                                                                 │
+  ╰─ turns: 1  cost: $0.0012  tokens: 1452→89                     ╯
+  user> _
 
-  ┌─ project=… host=… branch=… ──────────────────────────────┐
-  │                                                          │
-  │ conversation panel (scrolling)                           │
-  │                                                          │
-  ├─ tokens: …→…  cost: $…  turns: …  inbox: …  budget: $… ──┤
-  └──────────────────────────────────────────────────────────┘
-  > input prompt below
+Colour theme (Union Jack):
+  • Red    #C8102E — actions, prompts, emphasis
+  • Blue   #012169 — headers, borders, info
+  • Light  #1D70B8 — links, secondary
+  • White  #FFFFFF — text
+  • Navy   #0B1D3A — background
 
-Input goes through Rich's `console.input()`, which knows how to pause the
-Live display while reading. Diff approval is modal: a Panel pops up over
-the conversation and reads a single y/n/e/q keystroke via `tui_keys.read_key`.
-
-Multi-line input (`\"\"\"` blocks), `/`-slash commands, model swap, session
-resume — all the existing REPL features carry over.
-
-`--no-tui` on `baird code` falls back to the line REPL in repl.py.
+`--no-tui` falls back to the line REPL in repl.py.
 """
 
 from __future__ import annotations
@@ -52,6 +54,49 @@ from .repl import (
     extract_diff_blocks,
 )
 from .tui_keys import read_key
+
+# British-flag colour palette (Union Jack)
+BRIT_RED = "#C8102E"
+BRIT_BLUE = "#012169"
+BRIT_LIGHT_BLUE = "#1D70B8"
+BRIT_WHITE = "#FFFFFF"
+BRIT_NAVY = "#0B1D3A"
+BRIT_DIM = "#6B7C93"
+BRIT_GREEN = "#228B22"
+
+
+def _tool_icon(name: str) -> str:
+    """Map tool name to opencode-style icon."""
+    shell_like = {"run_on", "read_remote", "write_remote", "apply_diff_remote"}
+    read_like = {"read_file", "list_projects", "list_project_locations", "read_remote"}
+    write_like = {"write_file", "apply_diff", "edit_file"}
+    search_like = {"glob", "grep", "find"}
+    web_like = {"websearch", "research"}
+    fetch_like = {"webfetch", "fetch"}
+    mgmt = {"register_project", "add_project_location", "todowrite", "set_watch_root"}
+    if name in shell_like or name.startswith("run_"):
+        return "$"
+    if name in read_like:
+        return "\u2192"
+    if name in write_like:
+        return "\u2190"
+    if name in search_like:
+        return "\u2699"
+    if name in web_like:
+        return "\u25C7"
+    if name in fetch_like:
+        return "%"
+    if name in mgmt:
+        return "\u2699"
+    return "\u2699"
+
+
+def _tool_style(name: str) -> str:
+    """Style tag for a tool call line."""
+    shell_like = {"run_on", "read_remote", "write_remote", "apply_diff_remote"}
+    if name in shell_like:
+        return f"bold {BRIT_RED}"
+    return f"{BRIT_LIGHT_BLUE}"
 
 
 class FormParseError(ValueError):
@@ -229,7 +274,7 @@ def run_tui_repl(
     try:
         while True:
             try:
-                raw = _maybe_input("\n[bold cyan]user[/bold cyan]> ")
+                raw = _maybe_input(f"\n[bold {BRIT_RED}]user[/bold {BRIT_RED}]> ")
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 break
@@ -410,15 +455,15 @@ def run_tui_repl(
                     _print(Text(f"unknown command: /{cmd} (try /help)", style="red"))
                     continue
 
-            console.print(Rule(style="dim"))
-            streamed_any = False
-
+            # ── reset turn state ──
+            seen_tool_names: set[str] = set()
+            tool_output_lines: list[str] = []
             text_buf: list[str] = []
-            tool_call_log: list[dict] = []
+            turn_final_content: str | None = None
+            tool_spinner_idx = 0
 
             def _on_chunk(delta: str) -> None:
-                nonlocal streamed_any
-                streamed_any = True
+                nonlocal tool_spinner_idx
                 # Tool calls arrive as JSON {"tool_calls": [...]}
                 if delta.startswith('{"tool_calls":'):
                     try:
@@ -426,17 +471,33 @@ def run_tui_repl(
                         for tc in tc_list:
                             fn = tc.get("function", tc)
                             name = fn.get("name", "?")
-                            args_raw = fn.get("arguments", {})
-                            args_str = json.dumps(args_raw) if isinstance(args_raw, dict) else str(args_raw)
-                            tool_call_log.append({"name": name, "args": args_str[:120]})
+                            if name not in seen_tool_names:
+                                seen_tool_names.add(name)
+                                args_raw = fn.get("arguments", {})
+                                args_str = json.dumps(args_raw) if isinstance(args_raw, dict) else str(args_raw)
+                                icon = _tool_icon(name)
+                                style = _tool_style(name)
+                                console.out(
+                                    f"\n  {icon} {name}({args_str[:100]})",
+                                    style=style, highlight=False,
+                                )
                     except Exception:
                         pass
                 else:
                     text_buf.append(delta)
+                    tool_spinner_idx += 1
+                    if tool_spinner_idx % 80 == 0 and seen_tool_names:
+                        console.out(".", style=BRIT_DIM, end="", highlight=False)
+
+            def _on_tool_event(event: str, detail: str) -> None:
+                if event == "result" and detail:
+                    preview = detail.strip().splitlines()[0][:120] if detail else ""
+                    tool_output_lines.append(preview)
+                    console.out(f"\n  {preview}", style=BRIT_DIM, highlight=False)
+                elif event == "blocked":
+                    console.out(f"\n  ! blocked: {detail[:80]}", style=f"bold {BRIT_RED}", highlight=False)
 
             # Reconcile context sources that may have changed since last turn.
-            # Injects any detected changes as system messages in the session so
-            # they appear in the model's context before the user's message.
             if config.project_root is not None:
                 try:
                     from .context_loader import (
@@ -476,19 +537,23 @@ def run_tui_repl(
                     tool_registry=tool_registry,
                     agent_mode=agent_mode,
                     on_chunk=_on_chunk,
+                    on_tool_event=_on_tool_event,
                 )
             except ModelError as e:
-                _print(Text(f"model error: {e}", style="red"))
+                _print(Text(f"model error: {e}", style=BRIT_RED))
                 continue
-            if tool_call_log:
-                for tc in tool_call_log:
-                    _print(Text(f"  \u2699 {tc['name']}({tc['args'][:80]})", style="blue"))
-                if completion.content:
-                    console.print(completion.content)
-            elif streamed_any:
-                console.print("".join(text_buf))
-            else:
-                console.print(completion.content)
+
+            turn_final_content = completion.content
+            was_tools = len(seen_tool_names) > 0
+
+            if turn_final_content:
+                # Final answer: show it cleanly
+                lines = turn_final_content.strip().splitlines()
+                for ln in lines:
+                    console.print(Text(ln, style=BRIT_WHITE))
+            elif not was_tools and text_buf:
+                console.print(Text("".join(text_buf).strip(), style=BRIT_WHITE))
+
             stats.turns += 1
             stats.total_cost_usd += completion.cost_usd
             stats.total_input_tokens += completion.usage.input_tokens
@@ -522,10 +587,12 @@ def _render_header(ctx: RepoContext, host_id, session, config: ReplConfig) -> Pa
     branch = ctx.branch or "?"
     host = host_id or ctx.host_id or "?"
     body = (
-        f"[green]baird[/green]  project=[cyan]{project}[/cyan]  "
-        f"host={host}  branch={branch}  model={config.model}"
+        f"[{BRIT_RED}]baird[/{BRIT_RED}]  "
+        f"project=[{BRIT_LIGHT_BLUE}]{project}[/{BRIT_LIGHT_BLUE}]  "
+        f"host={host}  branch={branch}  "
+        f"model=[{BRIT_DIM}]{config.model}[/{BRIT_DIM}]"
     )
-    return Panel(body, border_style="green", padding=(0, 1))
+    return Panel(body, border_style=BRIT_BLUE, padding=(0, 1))
 
 
 def _render_status(stats: ReplStats, config: ReplConfig, completion=None) -> Panel:
@@ -536,12 +603,12 @@ def _render_status(stats: ReplStats, config: ReplConfig, completion=None) -> Pan
             f" tok / ${completion.cost_usd:.4f}"
         )
     body = (
-        f"turns: [cyan]{stats.turns}[/cyan]  "
-        f"cost: [yellow]${stats.total_cost_usd:.4f}[/yellow]  "
+        f"turns: [{BRIT_LIGHT_BLUE}]{stats.turns}[/{BRIT_LIGHT_BLUE}]  "
+        f"cost: [{BRIT_RED}]${stats.total_cost_usd:.4f}[/{BRIT_RED}]  "
         f"tokens: {stats.total_input_tokens}→{stats.total_output_tokens}"
         f"{last}"
     )
-    return Panel(body, border_style="blue", padding=(0, 1))
+    return Panel(body, border_style=BRIT_BLUE, padding=(0, 1))
 
 
 # ---------- /model handler ----------------------------------------------

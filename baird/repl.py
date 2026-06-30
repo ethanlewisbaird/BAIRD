@@ -302,9 +302,11 @@ def run_repl(
     agent_mode = AgentMode.BUILD if config.agent_mode == "build" else AgentMode.PLAN
     console.print(
         Panel.fit(
-            f"[green]baird code[/green]  project={config.project_id}  model={config.model}\n"
+            f"[#C8102E]baird code[/#C8102E]  "
+            f"project=[#1D70B8]{config.project_id}[/#1D70B8]  "
+            f"model=[#6B7C93]{config.model}[/#6B7C93]\n"
             f"session={session['id'][:8]}  /help for commands, /exit to quit",
-            border_style="green",
+            border_style="#012169",
         )
     )
 
@@ -541,8 +543,14 @@ def run_repl(
                 continue
 
         def _on_tool_event(event: str, detail: str) -> None:
-            color = {"call": "cyan", "result": "dim", "blocked": "yellow"}.get(event, "dim")
-            console.print(f"[{color}][{event}][/{color}] {detail}")
+            if event == "call":
+                console.print(f"[bold #C8102E]  $[/bold #C8102E] {detail}")
+            elif event == "result":
+                preview = detail.strip().splitlines()[0][:120] if detail else ""
+                if preview:
+                    console.print(f"[#6B7C93]{preview}[/#6B7C93]")
+            elif event == "blocked":
+                console.print(f"[bold #C8102E]  ![/bold #C8102E] {detail[:100]}")
 
         # Reconcile context sources that may have changed since last turn.
         # Injects any detected changes as system messages in the session so
