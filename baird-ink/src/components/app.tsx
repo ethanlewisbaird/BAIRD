@@ -38,11 +38,13 @@ export function App() {
       useSessionStore.getState().dispatchEvent(event);
     };
     const onExit = (_code: number | null) => {
+      if (_code === 0) {
+        process.exit(0);
+        return;
+      }
       useSessionStore.getState().dispatchEvent({
         kind: 'error',
-        text: _code === 0
-          ? 'session ended'
-          : `backend exited (code ${_code})`,
+        text: `backend exited (code ${_code}) — press Ctrl+C to quit`,
       } as any);
     };
     const adapter = startBackend(
