@@ -278,7 +278,7 @@ def _main() -> None:
     def _cmd_connect() -> None:
         providers = [
             ("OpenRouter", "OPENROUTER_API_KEY", "https://openrouter.ai/keys"),
-            ("OpenCode Zen", "OPENCODE_API_KEY", "https://opencode.ai/auth"),
+            ("OpenCode Go", "OPENCODE_API_KEY", "https://opencode.ai/auth"),
         ]
         _emit({
             "kind": "dialog",
