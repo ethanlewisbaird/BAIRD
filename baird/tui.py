@@ -75,16 +75,46 @@ BAR_THICK = "\u2503"
 
 # ── prompt_toolkit autocomplete ──────────────────────────────────────
 
-_LOCAL_COMMANDS = [
-    "exit", "context", "reset", "cost", "no-diff",
-    "model", "project", "sessions",
-]
+_LOCAL_DESCRIPTIONS: dict[str, str] = {
+    "exit": "Exit the REPL",
+    "context": "Show current context",
+    "reset": "Start a new session",
+    "cost": "Show token usage and cost",
+    "no-diff": "Disable diff approval prompts",
+    "model": "Switch model",
+    "project": "List / switch projects",
+    "sessions": "List recent sessions",
+}
+
+_HUB_DESCRIPTIONS: dict[str, str] = {
+    "project new": "Create a new project on the hub",
+    "project rename": "Rename a project",
+    "project delete": "Delete a project (destructive)",
+    "project locations": "List project locations on satellites",
+    "project add-location": "Add a location to a project",
+    "project enrich": "Probe satellite paths for project metadata",
+    "project tree": "Show project hierarchy tree",
+    "project siblings": "List sibling projects",
+    "host add": "Enrol a satellite host",
+    "host edit": "Edit satellite watch root",
+    "env install": "Install environment on a satellite",
+    "where": "Search satellite paths for a project",
+    "run": "Run a command on a satellite",
+    "audit-satellite": "Audit satellite directory for projects",
+    "satellite enroll": "Enrol a new satellite",
+    "satellite list": "List enrolled satellites",
+    "satellite remove": "Remove a satellite from the registry",
+    "mcp connect": "Connect an MCP server",
+    "mcp disconnect": "Disconnect an MCP server",
+}
 
 
-def _all_slash_commands() -> list[str]:
-    """Combined list of local commands + hub-first slash commands (matching /help)."""
-    from .slash import commands as slash_commands
-    return _LOCAL_COMMANDS + slash_commands()
+def _all_descriptions() -> dict[str, str]:
+    """Combined description map: local + hub-first commands."""
+    d: dict[str, str] = dict(_LOCAL_DESCRIPTIONS)
+    for k, v in _HUB_DESCRIPTIONS.items():
+        d[k] = v
+    return d
 
 
 class SlashCompleter(Completer):
@@ -95,9 +125,12 @@ class SlashCompleter(Completer):
         # Slash commands at start of input
         if text.startswith("/") and " " not in text:
             partial = text[1:].lower()
-            for cmd in _all_slash_commands():
+            for cmd, desc in _all_descriptions().items():
                 if cmd.startswith(partial):
-                    yield Completion(f"/{cmd} ", start_position=-len(text))
+                    yield Completion(
+                        f"/{cmd} ", start_position=-len(text),
+                        display_meta=desc,
+                    )
         # @-mentions
         at_idx = text.rfind("@")
         if at_idx >= 0 and " " not in text[at_idx:]:
