@@ -75,11 +75,16 @@ BAR_THICK = "\u2503"
 
 # ── prompt_toolkit autocomplete ──────────────────────────────────────
 
-_SLASH_COMMANDS = [
-    "exit", "quit", "help", "context", "reset", "cost", "no-diff",
-    "model", "project", "project new", "project list",
-    "sessions", "undo", "redo",
+_LOCAL_COMMANDS = [
+    "exit", "context", "reset", "cost", "no-diff",
+    "model", "project", "sessions",
 ]
+
+
+def _all_slash_commands() -> list[str]:
+    """Combined list of local commands + hub-first slash commands (matching /help)."""
+    from .slash import commands as slash_commands
+    return _LOCAL_COMMANDS + slash_commands()
 
 
 class SlashCompleter(Completer):
@@ -90,7 +95,7 @@ class SlashCompleter(Completer):
         # Slash commands at start of input
         if text.startswith("/") and " " not in text:
             partial = text[1:].lower()
-            for cmd in _SLASH_COMMANDS:
+            for cmd in _all_slash_commands():
                 if cmd.startswith(partial):
                     yield Completion(f"/{cmd} ", start_position=-len(text))
         # @-mentions
