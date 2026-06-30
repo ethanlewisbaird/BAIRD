@@ -16,6 +16,11 @@ with `baird inbox`; accepted proposals go through the normal diff → approval
 cycle (Phase 3).
 
 Budget: per design default `max_cost_usd: 0.30` per firing.
+
+Hermes-style background review:
+  ``maybe_background_review()`` runs a cheap model call after every few turns
+  to reflect on the conversation and optionally persist a memory or skill
+  update. Lightweight analogue of Hermes Agent's background_review.py.
 """
 
 from __future__ import annotations
@@ -23,8 +28,10 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .memory_client import HubClient
 from .model import OpenRouterClient
@@ -50,6 +57,19 @@ below and propose up to FIVE concrete changes. Return strictly JSON of the form:
 
 Be specific. Cite action IDs in evidence_action_ids. Prefer one strong proposal
 over five weak ones. If nothing is worth changing, return {"proposals": []}.
+"""
+
+# Hermes-style background review prompt: lightweight turn reflection.
+_BACKGROUND_REVIEW_PROMPT = """\
+Review the conversation turn above. Be concise.
+
+If the user revealed a durable preference, workflow pattern, or personal detail,
+call memory(action="add", target="memory", content="...").
+
+If a useful technique, fix, or debugging pattern emerged that would benefit
+future sessions, call memory(action="add", target="skill", content="...").
+
+Otherwise say "Nothing to save." and stop. Limit to 3 entries max.
 """
 
 
@@ -171,3 +191,41 @@ def _render_corpus(actions: list[dict], tasks: dict[str, Task]) -> str:
             )
 
     return "\n".join(parts)
+
+
+# ── Hermes-style background turn review ─────────────────────────────────
+
+
+def maybe_background_review(
+    model_client: OpenRouterClient,
+    messages: list[dict[str, Any]],
+    config: Any,
+    console: Any = None,
+) -> None:
+    """Lightweight hermes-style background review after every N turns.
+
+    Runs a cheap model call in a daemon thread to reflect on the most recent
+    conversation turn and optionally persist a memory or skill update.
+    """
+    if not messages:
+        return
+    recent = messages[-6:] if len(messages) > 6 else messages
+
+    def _review():
+        try:
+            from .model import ModelError
+            completion = model_client.complete(
+                model=config.model,
+                messages=recent,
+                system=_BACKGROUND_REVIEW_PROMPT,
+                max_tokens=512,
+                temperature=0.3,
+            )
+            content = (completion.content or "").strip()
+            if content and "Nothing to save" not in content and console:
+                console.print(f"\n  \U0001f4be {content[:200]}", style="#6B7C93")
+        except (ModelError, Exception) as e:
+            log.debug("background review skipped: %s", e)
+
+    t = threading.Thread(target=_review, daemon=True, name="bg-review")
+    t.start()

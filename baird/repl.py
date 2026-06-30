@@ -228,8 +228,12 @@ class ReplConfig:
     agent_mode: str = "build"
 
 
-def _system_prompt(rendered_context: str) -> str:
+def _system_prompt(rendered_context: str, mode: "AgentMode | None" = None) -> str:
     """Compose the per-turn system prompt.
+
+    ``mode`` controls the agent persona:
+      - BUILD (default): full access coding agent — opencode's "build"
+      - PLAN: read-only analysis agent — opencode's "plan"
 
     Tools are advertised via the OpenAI `tools=[...]` schema on the request,
     not in the system text — duplicating them as prose competes with the
@@ -237,18 +241,41 @@ def _system_prompt(rendered_context: str) -> str:
     calls instead of native tool_calls. We just remind the model to use the
     function-calling channel when changing hub-owned state.
     """
+    from .agent_tools import AgentMode
+
+    if mode == AgentMode.PLAN:
+        return _PLAN_SYSTEM_PROMPT(rendered_context)
+    return _BUILD_SYSTEM_PROMPT(rendered_context)
+
+
+def _BUILD_SYSTEM_PROMPT(rendered_context: str) -> str:
     return (
-        "You are BAIRD, a bioinformatics research assistant. The active "
-        "project's context follows. Be concise and silent while working: do "
-        "not narrate your thought process, say what you're about to do, or "
-        "add commentary between tool calls. Just execute the tools you need "
-        "and present results in a structured format (tables, lists, fenced "
-        "code blocks). When proposing code, give the change as a fenced "
-        "unified diff so it can be reviewed and applied. For changes to "
-        "hub-owned state (project locations, decisions, environment installs, "
-        "satellite host.yaml) and for anything that needs to read files or "
-        "run commands on a satellite, use the function-calling tools provided "
-        "— do not invent your own tool-call syntax in the message body.\n\n"
+        "You are BAIRD, a bioinformatics research assistant in BUILD mode. "
+        "You have full access to tools for reading/writing files, running "
+        "commands on satellites, and managing projects. The active project's "
+        "context follows. Be concise and silent while working: do not narrate "
+        "your thought process, say what you're about to do, or add commentary "
+        "between tool calls. Just execute the tools you need and present "
+        "results in a structured format (tables, lists, fenced code blocks). "
+        "When proposing code, give the change as a fenced unified diff so it "
+        "can be reviewed and applied. For changes to hub-owned state (project "
+        "locations, decisions, environment installs, satellite host.yaml) and "
+        "for anything that needs to read files or run commands on a satellite, "
+        "use the function-calling tools provided — do not invent your own "
+        "tool-call syntax in the message body.\n\n"
+        + rendered_context
+    )
+
+
+def _PLAN_SYSTEM_PROMPT(rendered_context: str) -> str:
+    return (
+        "You are BAIRD in PLAN mode — a read-only code exploration agent "
+        "(opencode-style). Your goal is to understand the codebase, answer "
+        "questions, and propose changes. You CANNOT write files, run "
+        "destructive commands, or modify project state. You have access to "
+        "safe read-only tools (read files, search, list projects). Be concise "
+        "and focused: explain what you find, suggest approaches, but never "
+        "execute write operations. The active project's context follows.\n\n"
         + rendered_context
     )
 
@@ -294,12 +321,12 @@ def run_repl(
     # system messages on subsequent turns.
     from .context_loader import build_epoch_context, reconcile_context
     epoch = build_epoch_context(repo_ctx)
-    system = _system_prompt(epoch.baseline)
 
     # Dynamic tool registry shared across the session.
     from .agent_tools import AgentMode, ToolRegistry
     tool_registry = ToolRegistry()
     agent_mode = AgentMode.BUILD if config.agent_mode == "build" else AgentMode.PLAN
+    system = _system_prompt(epoch.baseline, mode=agent_mode)
     console.print(
         Panel.fit(
             f"[#C8102E]baird code[/#C8102E]  "
@@ -497,7 +524,7 @@ def run_repl(
                     )
                     repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
                     rendered = render_context(repo_ctx)
-                    system = _system_prompt(rendered)
+                    system = _system_prompt(rendered, mode=agent_mode)
                     config.project_id = target_id
                     config.project_root = None
                     session = hub.find_or_create_session_for_task(
@@ -964,6 +991,7 @@ def _format_tool_result(result: object) -> str:
 def _switch_project(target_id, hub, config, host_id, console):
     """Reload context/session for `target_id`. Used by /project switch and by
     slash commands that signal `switch_to_project` (e.g. /project new)."""
+    from .agent_tools import AgentMode
     from .context_loader import lite_repo_context
     from .project_yaml import ProjectYaml
 
@@ -982,7 +1010,7 @@ def _switch_project(target_id, hub, config, host_id, console):
     )
     repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
     rendered = render_context(repo_ctx)
-    system = _system_prompt(rendered)
+    system = _system_prompt(rendered, mode=AgentMode(getattr(config, "agent_mode", "build")))
     config.project_id = target_id
     config.project_root = None
     session = hub.find_or_create_session_for_task(

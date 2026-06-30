@@ -36,12 +36,14 @@ from .satellite import load_registry
 class AgentMode(str, Enum):
     """Defines which tools are visible to the model.
 
-    - BUILD: full tool access (default coding mode)
-    - PLAN: read-only analysis (safe tools only)
+    - BUILD: full tool access (default coding mode)     — opencode's "build"
+    - PLAN: read-only analysis (safe tools only)         — opencode's "plan"
+    - AUTO: autonomous background mode (hermes-style)    — hermes agent
     """
 
     BUILD = "build"
     PLAN = "plan"
+    AUTO = "auto"
 
     def filter_tools(self, catalogue: dict[str, Tool]) -> dict[str, Tool]:
         """Return the subset of `catalogue` visible in this mode."""
@@ -49,6 +51,18 @@ class AgentMode(str, Enum):
             return dict(catalogue)
         # PLAN mode: only safe tools
         return {k: v for k, v in catalogue.items() if v.tier == Tier.SAFE}
+
+    @property
+    def icon(self) -> str:
+        return {"build": "\U0001f6e0", "plan": "\U0001f4ad", "auto": "\U0001f916"}.get(self.value, "?")
+
+    @property
+    def badge(self) -> str:
+        return f"{self.icon} {self.value.upper()}"
+
+    def toggle(self) -> AgentMode:
+        """Cycle: BUILD → PLAN → BUILD (opencode-style tab switching)."""
+        return AgentMode.PLAN if self == AgentMode.BUILD else AgentMode.BUILD
 
 
 class ToolRegistry:

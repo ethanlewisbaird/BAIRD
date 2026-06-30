@@ -44,7 +44,9 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+from .agent_tools import AgentMode
 from .context_loader import RepoContext
+from .self_improve import maybe_background_review
 from .diff_apply import DiffApplyError, apply_diff_to_repo
 from .memory_client import HubClient
 from .model import ModelError, OpenRouterClient, top_openrouter_models
@@ -66,6 +68,7 @@ BRIT_WHITE = "#FFFFFF"
 BRIT_NAVY = "#0B1D3A"
 BRIT_DIM = "#6B7C93"
 BRIT_GREEN = "#228B22"
+BRIT_GOLD = "#FFD700"
 
 # ── opencode-style rendering helpers ──────────────────────────────────
 
@@ -131,21 +134,42 @@ class SlashCompleter(Completer):
                         f"/{cmd} ", start_position=-len(text),
                         display_meta=desc,
                     )
-        # @-mentions
+        # @-mentions (opencode-style subagent invocation)
         at_idx = text.rfind("@")
         if at_idx >= 0 and " " not in text[at_idx:]:
             partial = text[at_idx + 1:]
-            yield Completion(f"@{partial} ", start_position=-len(partial))
+            for mention, desc in [("general", "Complex multi-step tasks"), ("explore", "Fast codebase exploration")]:
+                if mention.startswith(partial):
+                    yield Completion(
+                        f"@{mention} ", start_position=-len(partial),
+                        display_meta=desc,
+                    )
 
 
-def _make_pt_session() -> PromptSession:
-    """Create a prompt_toolkit session with history and autocomplete."""
+def _make_pt_session(on_mode_switch: Callable[[], None] | None = None) -> PromptSession:
+    """Create a prompt_toolkit session with history, autocomplete, and Tab binding.
+
+    ``on_mode_switch`` is called when the user presses Tab without text —
+    to toggle between BUILD and PLAN agents (opencode style).
+    """
     hist_path = os.path.expanduser("~/.baird/repl_history")
     os.makedirs(os.path.dirname(hist_path), exist_ok=True)
+
+    kb = KeyBindings()
+
+    @kb.add("tab")
+    def _on_tab(event):
+        b = event.app.current_buffer
+        if b and b.text.strip():
+            b.insert_text("    ")
+        elif on_mode_switch is not None:
+            on_mode_switch()
+
     return PromptSession(
         completer=SlashCompleter(),
         auto_suggest=AutoSuggestFromHistory(),
         history=FileHistory(hist_path),
+        key_bindings=kb,
         style=PtStyle.from_dict({
             "completion-menu.completion": "bg:#012169 #ffffff",
             "completion-menu.completion.current": "bg:#C8102E #ffffff",
@@ -192,22 +216,26 @@ def _tool_style(name: str) -> str:
 
 # ── opencode-style header / status ────────────────────────────────────
 
-def _render_header(ctx: RepoContext, host_id, session, config: ReplConfig) -> Text:
+def _render_header(ctx: RepoContext, host_id, session, config: ReplConfig, mode: AgentMode = AgentMode.BUILD) -> Text:
     """Compact status line with left-border vertical bar — opencode style."""
     project = ctx.project.id if ctx.project else "?"
     branch = ctx.branch or "?"
     host = host_id or ctx.host_id or "?"
     return Text.assemble(
         (f"{BAR_THICK} baird  ", f"bold {BRIT_RED}"),
+        (f" {mode.badge} ", f"reverse {BRIT_BLUE}"),
+        ("  ", ""),
         (f"project={project}  host={host}  branch={branch}  ", BRIT_WHITE),
         (f"model={config.model}", BRIT_DIM),
     )
 
 
-def _render_header_compact(host_id, session, config: ReplConfig) -> Text:
+def _render_header_compact(host_id, session, config: ReplConfig, mode: AgentMode = AgentMode.BUILD) -> Text:
     """Short header when no RepoContext is available."""
     return Text.assemble(
         (f"{BAR_THICK} baird  ", f"bold {BRIT_RED}"),
+        (f" {mode.badge} ", f"reverse {BRIT_BLUE}"),
+        ("  ", ""),
         (f"project={config.project_id}  host={host_id or '?'}  ", BRIT_WHITE),
         (f"model={config.model}", BRIT_DIM),
     )
@@ -372,15 +400,23 @@ def run_tui_repl(
 
     from .context_loader import build_epoch_context, reconcile_context
     epoch = build_epoch_context(repo_ctx)
-    system = _system_prompt(epoch.baseline)
 
     from .agent_tools import AgentMode, ToolRegistry
     tool_registry = ToolRegistry()
     agent_mode = getattr(config, "_agent_mode", AgentMode.BUILD)
+    system = _system_prompt(epoch.baseline, mode=agent_mode)
 
     iterator: Iterable[str] | None = iter(inputs) if inputs is not None else None
     _use_pt = iterator is None and os.isatty(0)
-    pt_session: PromptSession | None = _make_pt_session() if _use_pt else None
+
+    def _switch_mode():
+        nonlocal agent_mode, system
+        agent_mode = agent_mode.toggle()
+        system = _system_prompt(rendered, mode=agent_mode)
+        console.print(_render_header(repo_ctx, host_id, session, config, agent_mode))
+        console.out(f"\n  switched to {agent_mode.badge}", style=BRIT_DIM, highlight=False)
+
+    pt_session: PromptSession | None = _make_pt_session(on_mode_switch=_switch_mode) if _use_pt else None
 
     # Store rendered context for /context command
     rendered: str = epoch.baseline
@@ -398,9 +434,10 @@ def run_tui_repl(
             return pt_session.prompt(prompt, vi_mode=True)
         return console.input(prompt)
 
-    console.print(_render_header(repo_ctx, host_id, session, config))
+    console.print(_render_header(repo_ctx, host_id, session, config, agent_mode))
     console.print(Text(
-        f"{BAR_THICK} {session['id'][:8]}", style=BRIT_DIM
+        f"{BAR_THICK} session {session['id'][:8]}   Tab to switch agent",
+        style=BRIT_DIM
     ))
 
     try:
@@ -458,7 +495,7 @@ def run_tui_repl(
                         )
                         if swapped[0] is not None:
                             rendered, system, repo_ctx, session = swapped
-                            console.print(_render_header(repo_ctx, host_id, session, config))
+                            console.print(_render_header(repo_ctx, host_id, session, config, agent_mode))
                     if slash_res.next_user_prompt:
                         line = slash_res.next_user_prompt
                     else:
@@ -552,7 +589,7 @@ def run_tui_repl(
                         )
                         repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
                         rendered = render_context(repo_ctx)
-                        system = _system_prompt(rendered)
+                        system = _system_prompt(rendered, mode=agent_mode)
                         config.project_id = target_id
                         config.project_root = None
                         session = hub.find_or_create_session_for_task(
@@ -560,7 +597,7 @@ def run_tui_repl(
                             project_id=target_id,
                             mode="code",
                         )
-                        console.print(_render_header(repo_ctx, host_id, session, config))
+                        console.print(_render_header(repo_ctx, host_id, session, config, agent_mode))
                         _print(Text(
                             f"switched to project {target_id}  session={session['id'][:8]}",
                             style="yellow",
@@ -682,7 +719,6 @@ def run_tui_repl(
                     pass
 
             try:
-
                 completion = _one_turn(
                     user_msg=line,
                     hub=hub,
@@ -715,6 +751,13 @@ def run_tui_repl(
             stats.total_input_tokens += completion.usage.input_tokens
             stats.total_output_tokens += completion.usage.output_tokens
             console.print(_render_status(stats, config, completion))
+
+            if stats.turns % 4 == 0:
+                try:
+                    msgs = hub.get_messages(session["id"], limit=10)
+                    maybe_background_review(model_client, msgs, config, console)
+                except Exception:
+                    pass
 
             if diff_loop_active and config.project_root is not None:
                 _handle_diff_blocks_tui(

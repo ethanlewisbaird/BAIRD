@@ -156,7 +156,7 @@ def code(
     ),
     mode: str = typer.Option(
         "build", "--mode", "-M",
-        help="Agent mode: 'build' (full access) or 'plan' (read-only, safe tools only).",
+        help="Agent mode: 'build' (full access, default) or 'plan' (read-only analysis). Tab switches in TUI.",
     ),
 ) -> None:
     """Interactive coding mode.
