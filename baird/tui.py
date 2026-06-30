@@ -50,10 +50,17 @@ from .repl import (
 )
 from .self_improve import maybe_background_review
 
-from .layout import render_from_state
+from .layout import (
+    render_dialog,
+    render_from_state,
+    render_header,
+    render_status,
+    render_user_message,
+)
 from .theme import (
     BAR,
     OC,
+    SPINNER_FRAMES,
 )
 from .tui_keys import read_key
 from .uistate import UIState, Dialog, Message, TextPart, ToolCallPart, ToolResultPart
@@ -380,28 +387,22 @@ def run_tui_repl(
         agent_mode = agent_mode.toggle()
         system = _system_prompt(rendered, mode=agent_mode)
         state.agent_mode = agent_mode
-        state.messages.append(Message(
-            role="system",
-            content=f"switched to {agent_mode.badge}",
-            parts=[],
-        ))
+        console.print(Text(f"switched to {agent_mode.badge}", style=OC.info))
 
     def _on_viewport_action(action: str) -> None:
         if action == "sidebar":
             state.toggle_sidebar()
-            _render()
+            console.print(Text(f"sidebar {'on' if state.sidebar_visible else 'off'}", style=OC.textMuted))
         elif action == "timestamps":
             state.toggle_timestamps()
-            _render()
+            console.print(Text(f"timestamps {'on' if state.show_timestamps else 'off'}", style=OC.textMuted))
         elif action == "expand_all":
             state.all_tools_expanded = not state.all_tools_expanded
-            _render()
+            console.print(Text(f"tools {'expanded' if state.all_tools_expanded else 'collapsed'}", style=OC.textMuted))
         elif action == "scroll_up":
             state.scroll_offset = min(state.scroll_offset + 4, len(state.messages) * 3)
-            _render()
         elif action == "scroll_down":
             state.scroll_offset = max(state.scroll_offset - 4, 0)
-            _render()
 
     pt_session: PromptSession | None = _make_pt_session(
         on_mode_switch=_switch_mode,
@@ -418,403 +419,361 @@ def run_tui_repl(
             return pt_session.prompt(prompt, vi_mode=False)
         return console.input(prompt)
 
-    # ── Live loop ──
-    from rich.live import Live as RichLive
-
-    live: RichLive | None = None
+    # ── Main loop (inline rendering, no RichLive) ──
+    console.print(render_header(state))
+    if state.session_id:
+        console.print(Text(f"{BAR}  session {state.session_id}", style=OC.textMuted))
 
     def _render():
-        """Refresh the Live display from current state."""
-        if live is not None:
-            try:
-                live.update(render_from_state(state))
-            except Exception:
-                pass
+        pass  # no-op — we print directly
 
     def _print(line: Text | str) -> None:
-        """Fallback print for non-Live output (slash command results, etc.)."""
         m = Text(line) if isinstance(line, str) else line
         state.messages.append(Message(role="system", content=m.plain, parts=[]))
-        _render()
+        console.print(m)
 
     try:
-        with RichLive(
-            render_from_state(state),
-            screen=_use_pt,
-            auto_refresh=False,       # don't auto-refresh — avoids overwriting prompt_toolkit input
-            refresh_per_second=4,
-        ) as lv:
-            live = lv
-            _render()
-
-            while True:
-                # ── Dialog key dispatch (B5) ──
-                if state.dialog is not None:
-                    _render()
-                    try:
-                        if _use_pt:
-                            dlg_key = _maybe_input(f"{BAR}  ")
-                        else:
-                            dlg_key = _maybe_input("▸ ")
-                    except (EOFError, KeyboardInterrupt):
-                        break
-                    dlg_key = dlg_key.strip().lower()
-                    if dlg_key == "q" or dlg_key == "\x1b":
-                        state.dialog = None
-                        _render()
-                        continue
-                    if dlg_key.isdigit() and state.dialog.choices:
-                        idx = int(dlg_key) - 1
-                        if 0 <= idx < len(state.dialog.choices):
-                            state.dialog.result = state.dialog.choices[idx]
-                            state.dialog = None
-                            _render()
-                            continue
-                    continue
-
-                # ── Get user input (pause Live, use prompt_toolkit, resume) ──
-                state.prompt_text = ""
-                _render()
+        while True:
+            # ── Dialog key dispatch (B5) ──
+            if state.dialog is not None:
+                console.print(render_dialog(state.dialog))
                 try:
                     if _use_pt:
-                        raw = _maybe_input(f"{BAR}  ")
+                        dlg_key = _maybe_input("> ")
                     else:
-                        raw = _maybe_input("▸ ")
+                        dlg_key = _maybe_input("> ")
                 except (EOFError, KeyboardInterrupt):
                     break
-
-                if raw.strip() == '"""':
-                    buf: list[str] = []
-                    while True:
-                        try:
-                            nxt = _maybe_input("... ")
-                        except (EOFError, KeyboardInterrupt):
-                            break
-                        if nxt.strip() == '"""':
-                            break
-                        buf.append(nxt.rstrip("\n"))
-                    raw = "\n".join(buf)
-
-                line = raw.strip()
-                if not line:
+                dlg_key = dlg_key.strip().lower()
+                if dlg_key == "q" or dlg_key == "\x1b":
+                    state.dialog = None
                     continue
+                if dlg_key.isdigit() and state.dialog.choices:
+                    idx = int(dlg_key) - 1
+                    if 0 <= idx < len(state.dialog.choices):
+                        state.dialog.result = state.dialog.choices[idx]
+                        state.dialog = None
+                        continue
+                continue
 
-                # ── Slash commands ──
-                if line.startswith("/"):
-                    from .agent_tools import ToolEnv
-                    from .slash import SlashContext
-                    from .slash import try_dispatch as _try_slash
+            # ── Get user input ──
+            try:
+                if _use_pt:
+                    raw = _maybe_input(f"{BAR}  ")
+                else:
+                    raw = _maybe_input("▸ ")
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                break
 
-                    slash_ctx = SlashContext(
-                        hub=hub,
-                        env=ToolEnv(hub=hub, project_id=config.project_id),
-                        input_fn=_maybe_input,
-                        console=console,
-                        active_host=getattr(config, "_active_host", None),
-                        tool_registry=tool_registry,
-                    )
-                    slash_res = _try_slash(line[1:], slash_ctx)
-                    if slash_res is not None:
-                        if slash_res.output:
-                            ok_s = OC.success if slash_res.ok else OC.error
-                            state.messages.append(Message(
-                                role="system",
-                                content=slash_res.output,
-                                parts=[],
-                            ))
-                            _render()
-                        if slash_res.active_host:
-                            config._active_host = slash_res.active_host  # type: ignore[attr-defined]
-                        if slash_res.switch_to_project:
-                            from .repl import _switch_project
+            if raw.strip() == '"""':
+                buf: list[str] = []
+                while True:
+                    try:
+                        nxt = _maybe_input("... ")
+                    except (EOFError, KeyboardInterrupt):
+                        break
+                    if nxt.strip() == '"""':
+                        break
+                    buf.append(nxt.rstrip("\n"))
+                raw = "\n".join(buf)
 
-                            swapped = _switch_project(
-                                slash_res.switch_to_project, hub, config, host_id, console
-                            )
-                            if swapped[0] is not None:
-                                rendered, system, repo_ctx, session = swapped
-                                state.project_id = config.project_id
-                                state.session_id = session["id"][:8]
-                                state.project_display = repo_ctx.project.id if repo_ctx.project else config.project_id
-                                _render()
-                        if slash_res.next_user_prompt:
-                            line = slash_res.next_user_prompt
-                        else:
-                            continue
+            line = raw.strip()
+            if not line:
+                continue
 
-                    handed_off = False
-                    if slash_res is not None and slash_res.next_user_prompt:
-                        handed_off = True
-                    if not handed_off:
-                        cmd = line[1:].split()[0].lower()
-                        if cmd in {"exit", "quit"}:
-                            break
-                        if cmd == "context":
-                            state.messages.append(Message(role="system", content=rendered, parts=[]))
-                            _render()
-                            continue
-                        if cmd == "reset":
-                            session = hub.new_session(
-                                mode="code",
-                                project_id=config.project_id,
-                                task_id=f"repl-{config.project_id}",
-                            )
-                            state.session_id = session["id"][:8]
-                            state.messages.clear()
-                            _render()
-                            continue
-                        if cmd == "cost":
-                            state.messages.append(Message(role="system", content=(
-                                f"turns={stats.turns}  cost=${stats.total_cost_usd:.4f}  "
-                                f"tokens={stats.total_input_tokens}→{stats.total_output_tokens}"
-                            ), parts=[]))
-                            _render()
-                            continue
-                        if cmd in {"no-diff", "nodiff"}:
-                            diff_loop_active = False
-                            state.messages.append(Message(role="system", content="diff prompts disabled for this session", parts=[]))
-                            _render()
-                            continue
-                        if cmd == "model":
-                            _handle_model_cmd(line, config, model_picker_cache, console, _print)
-                            state.model = config.model
-                            _render()
-                            continue
-                        if cmd == "project":
-                            from .context_loader import lite_repo_context
-                            from .project_yaml import ProjectYaml
+            # ── Slash commands ──
+            if line.startswith("/"):
+                from .agent_tools import ToolEnv
+                from .slash import SlashContext
+                from .slash import try_dispatch as _try_slash
 
-                            parts = line.split()
-                            if len(parts) == 1:
-                                rows = hub.list_projects()
-                                if not rows:
-                                    state.messages.append(Message(role="system", content="no projects on the hub", parts=[]))
-                                else:
-                                    for r in rows:
-                                        marker = "*" if r["id"] == config.project_id else " "
-                                        state.messages.append(Message(role="system", content=f" {marker} {r['id']}  {r.get('name','')}", parts=[]))
-                                    state.messages.append(Message(role="system", content="switch: /project <id>   create: /project new <id> [name]", parts=[]))
-                                _render()
-                                continue
-                            sub = parts[1]
-                            if sub == "list":
-                                rows = hub.list_projects()
-                                if not rows:
-                                    state.messages.append(Message(role="system", content="no projects on the hub", parts=[]))
-                                else:
-                                    for r in rows:
-                                        marker = "*" if r["id"] == config.project_id else " "
-                                        state.messages.append(Message(role="system", content=f" {marker} {r['id']}  {r.get('name','')}", parts=[]))
-                                    state.messages.append(Message(role="system", content="switch: /project <id>   create: /project new <id> [name]", parts=[]))
-                                _render()
-                                continue
-                            if sub == "new":
-                                if len(parts) < 3:
-                                    state.messages.append(Message(role="system", content="usage: /project new <id> [name]", parts=[]))
-                                    _render()
-                                    continue
-                                new_id = parts[2]
-                                new_name = " ".join(parts[3:]) if len(parts) > 3 else new_id
-                                try:
-                                    hub.upsert_project(id=new_id, name=new_name)
-                                except Exception as e:
-                                    state.messages.append(Message(role="system", content=f"create failed: {e}", parts=[]))
-                                    _render()
-                                    continue
-                                state.messages.append(Message(role="system", content=f"created project {new_id}", parts=[]))
-                                _render()
-                                target_id = new_id
-                            else:
-                                target_id = sub
-                            try:
-                                proj_row = hub.get_project(target_id)
-                            except Exception as e:
-                                state.messages.append(Message(role="system", content=f"project '{target_id}' not on hub: {e}", parts=[]))
-                                _render()
-                                continue
-                            py = ProjectYaml(
-                                id=proj_row["id"],
-                                name=proj_row.get("name") or proj_row["id"],
-                                github=proj_row.get("github"),
-                                context=proj_row.get("context"),
-                                parent_id=proj_row.get("parent_id")
-                                or (proj_row.get("config") or {}).get("parent_id"),
-                            )
-                            repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
-                            rendered = render_context(repo_ctx)
-                            system = _system_prompt(rendered, mode=agent_mode)
-                            config.project_id = target_id
-                            config.project_root = None
-                            session = hub.find_or_create_session_for_task(
-                                task_id=f"repl-{target_id}",
-                                project_id=target_id,
-                                mode="code",
-                            )
-                            state.project_id = target_id
-                            state.session_id = session["id"][:8]
-                            state.project_display = target_id
-                            state.messages.append(Message(role="system", content=f"switched to project {target_id}  session={session['id'][:8]}", parts=[]))
-                            _render()
-                            continue
-                        if cmd == "sessions":
-                            rows = hub.list_sessions(project_id=config.project_id, limit=20)
-                            if not rows:
-                                state.messages.append(Message(role="system", content="no prior sessions for this project", parts=[]))
-                            else:
-                                state.messages.append(Message(role="system", content=f"sessions for {config.project_id}", parts=[]))
-                                for r in rows:
-                                    marker = "*" if r["id"] == session["id"] else " "
-                                    state.messages.append(Message(role="system", content=f" {marker} {r['id'][:8]}  {r.get('mode','?')}  started={r.get('started_at','')[:19]}", parts=[]))
-                            _render()
-                            continue
-                        if cmd == "help":
-                            from .slash import commands as _slash_cmds
+                slash_ctx = SlashContext(
+                    hub=hub,
+                    env=ToolEnv(hub=hub, project_id=config.project_id),
+                    input_fn=_maybe_input,
+                    console=console,
+                    active_host=getattr(config, "_active_host", None),
+                    tool_registry=tool_registry,
+                )
+                slash_res = _try_slash(line[1:], slash_ctx)
+                if slash_res is not None:
+                    if slash_res.output:
+                        ok_s = OC.success if slash_res.ok else OC.error
+                        console.print(Text(slash_res.output, style=ok_s))
+                    if slash_res.active_host:
+                        config._active_host = slash_res.active_host  # type: ignore[attr-defined]
+                    if slash_res.switch_to_project:
+                        from .repl import _switch_project
 
-                            text = ("/exit  /context  /reset  /cost  /model [id]  "
-                                    "/sessions  /project [id|new <id>]  /no-diff  /connect")
-                            state.messages.append(Message(role="system", content=text, parts=[]))
-                            state.messages.append(Message(role="system", content="hub-first: " + "  ".join(f"/{c}" for c in _slash_cmds()), parts=[]))
-                            _render()
-                            continue
-                        state.messages.append(Message(role="system", content=f"unknown command: /{cmd} (try /help)", parts=[]))
-                        _render()
+                        swapped = _switch_project(
+                            slash_res.switch_to_project, hub, config, host_id, console
+                        )
+                        if swapped[0] is not None:
+                            rendered, system, repo_ctx, session = swapped
+                            console.print(render_header(state))
+                    if slash_res.next_user_prompt:
+                        line = slash_res.next_user_prompt
+                    else:
                         continue
 
-                # ── User message ──
-                state.add_user_message(line)
-                _render()
-
-                # ── Context reconciliation ──
-                if config.project_root is not None:
-                    try:
-                        from .context_loader import (
-                            _build_tree,
-                            _git_log_oneline,
-                            _git_status,
+                handed_off = False
+                if slash_res is not None and slash_res.next_user_prompt:
+                    handed_off = True
+                if not handed_off:
+                    cmd = line[1:].split()[0].lower()
+                    if cmd in {"exit", "quit"}:
+                        break
+                    if cmd == "context":
+                        console.print(Text(rendered, style=OC.textMuted))
+                        continue
+                    if cmd == "reset":
+                        session = hub.new_session(
+                            mode="code",
+                            project_id=config.project_id,
+                            task_id=f"repl-{config.project_id}",
                         )
-                        fresh = RepoContext(
-                            project=repo_ctx.project, project_root=config.project_root,
-                            branch=repo_ctx.branch,
-                            git_log_lines=_git_log_oneline(config.project_root, n=10),
-                            git_status=_git_status(config.project_root),
-                            tree=_build_tree(config.project_root),
-                            relevant_files=repo_ctx.relevant_files,
-                            decisions=repo_ctx.decisions,
-                            action_summaries=repo_ctx.action_summaries,
-                            rules_summary=repo_ctx.rules_summary,
-                            host_id=repo_ctx.host_id,
-                            locations=repo_ctx.locations,
-                            parent=repo_ctx.parent,
-                        )
-                        updates = reconcile_context(epoch, fresh)
-                        for key, content in updates:
-                            msg_text = f"[context update: {key}]\n{content}"
-                            hub.append_message(session["id"], role="system", content=msg_text)
-                    except Exception:
-                        pass
+                        state.session_id = session["id"][:8]
+                        state.messages.clear()
+                        console.print(Text(f"session reset: {session['id'][:8]}", style=OC.info))
+                        continue
+                    if cmd == "cost":
+                        console.print(Text(
+                            f"turns={stats.turns}  cost=${stats.total_cost_usd:.4f}  "
+                            f"tokens={stats.total_input_tokens}→{stats.total_output_tokens}",
+                            style=OC.textMuted,
+                        ))
+                        continue
+                    if cmd in {"no-diff", "nodiff"}:
+                        diff_loop_active = False
+                        console.print(Text("diff prompts disabled", style=OC.warning))
+                        continue
+                    if cmd == "model":
+                        _handle_model_cmd(line, config, model_picker_cache, console, _print)
+                        state.model = config.model
+                        continue
+                    if cmd == "project":
+                        from .context_loader import lite_repo_context
+                        from .project_yaml import ProjectYaml
 
-                # ── Model turn ──
-                state.start_assistant_turn()
-                _render()
-
-                seen_tool_names: set[str] = set()
-
-                def _on_chunk(delta: str) -> None:
-                    state.spinner_frame += 1
-                    if delta.startswith('{"tool_calls":'):
+                        parts = line.split()
+                        if len(parts) == 1:
+                            rows = hub.list_projects()
+                            if not rows:
+                                console.print(Text("no projects on the hub", style=OC.textMuted))
+                            else:
+                                for r in rows:
+                                    marker = "*" if r["id"] == config.project_id else " "
+                                    console.print(Text(f" {marker} {r['id']}  {r.get('name','')}", style=OC.text))
+                                console.print(Text("switch: /project <id>   create: /project new <id> [name]", style=OC.textMuted))
+                            continue
+                        sub = parts[1]
+                        if sub == "list":
+                            rows = hub.list_projects()
+                            if not rows:
+                                console.print(Text("no projects on the hub", style=OC.textMuted))
+                            else:
+                                for r in rows:
+                                    marker = "*" if r["id"] == config.project_id else " "
+                                    console.print(Text(f" {marker} {r['id']}  {r.get('name','')}", style=OC.text))
+                            continue
+                        if sub == "new":
+                            if len(parts) < 3:
+                                console.print(Text("usage: /project new <id> [name]", style=OC.warning))
+                                continue
+                            new_id = parts[2]
+                            new_name = " ".join(parts[3:]) if len(parts) > 3 else new_id
+                            try:
+                                hub.upsert_project(id=new_id, name=new_name)
+                            except Exception as e:
+                                console.print(Text(f"create failed: {e}", style=OC.error))
+                                continue
+                            console.print(Text(f"created project {new_id}", style=OC.success))
+                            target_id = new_id
+                        else:
+                            target_id = sub
                         try:
-                            tc_list = json.loads(delta).get("tool_calls", [])
-                            for tc in tc_list:
-                                fn = tc.get("function", tc)
-                                name = fn.get("name", "?")
-                                if name not in seen_tool_names:
-                                    seen_tool_names.add(name)
-                                    args_raw = fn.get("arguments", {})
-                                    args_str = json.dumps(args_raw) if isinstance(args_raw, dict) else str(args_raw)
-                                    icon = _tool_icon(name)
-                                    state.append_tool_call(name, args_str[:100])
-                                    _render()
-                        except Exception:
-                            pass
-                    else:
-                        state.append_text(delta)
-                        # Re-render on every chunk for responsive typing feedback
-                        _render()
-
-                def _extract_tool_name(detail: str, event: str) -> str:
-                    if event == "call":
-                        return detail.split("(")[0]
-                    if event == "result":
-                        return detail.split(":")[0]
-                    if event == "blocked":
-                        if detail.startswith("unknown tool: "):
-                            return detail[len("unknown tool: "):]
-                        return detail.split(":")[0]
-                    return "tool"
-
-                def _on_tool_event(event: str, detail: str) -> None:
-                    if event == "result" and detail:
-                        name = _extract_tool_name(detail, event)
-                        icon = _tool_icon(name)
-                        # Strip leading "name: " prefix
-                        content = detail.strip()
-                        if ":" in content.splitlines()[0] if content else False:
-                            _, _, rest = content.partition(": ")
-                            content = rest
-                        state.append_tool_result(name, content, icon)
-                        _render()
-                    elif event == "blocked":
-                        state.messages.append(Message(role="system", content=f"blocked: {detail[:80]}", parts=[]))
-                        _render()
-                    elif event == "files" and detail:
-                        state.messages.append(Message(role="system", content=f"files changed: {detail[:200]}", parts=[]))
-                        _render()
-
-                try:
-                    completion = _one_turn(
-                        user_msg=line,
-                        hub=hub,
-                        model_client=model_client,
-                        session_id=session["id"],
-                        config=config,
-                        system=system,
-                        host_id=host_id,
-                        tool_registry=tool_registry,
-                        agent_mode=agent_mode,
-                        on_chunk=_on_chunk,
-                        on_tool_event=_on_tool_event,
-                    )
-                except ModelError as e:
-                    state.messages.append(Message(role="system", content=f"model error: {e}", parts=[]))
-                    _render()
+                            proj_row = hub.get_project(target_id)
+                        except Exception as e:
+                            console.print(Text(f"project '{target_id}' not on hub: {e}", style=OC.error))
+                            continue
+                        py = ProjectYaml(
+                            id=proj_row["id"],
+                            name=proj_row.get("name") or proj_row["id"],
+                            github=proj_row.get("github"),
+                            context=proj_row.get("context"),
+                            parent_id=proj_row.get("parent_id")
+                            or (proj_row.get("config") or {}).get("parent_id"),
+                        )
+                        repo_ctx = lite_repo_context(py, hub=hub, host_id=host_id)
+                        rendered = render_context(repo_ctx)
+                        system = _system_prompt(rendered, mode=agent_mode)
+                        config.project_id = target_id
+                        config.project_root = None
+                        session = hub.find_or_create_session_for_task(
+                            task_id=f"repl-{target_id}",
+                            project_id=target_id,
+                            mode="code",
+                        )
+                        state.project_id = target_id
+                        state.session_id = session["id"][:8]
+                        state.project_display = target_id
+                        console.print(Text(f"switched to project {target_id}  session={session['id'][:8]}", style=OC.info))
+                        continue
+                    if cmd == "sessions":
+                        rows = hub.list_sessions(project_id=config.project_id, limit=20)
+                        if not rows:
+                            console.print(Text("no prior sessions for this project", style=OC.textMuted))
+                        else:
+                            console.print(Text(f"sessions for {config.project_id}", style=OC.text))
+                            for r in rows:
+                                marker = "*" if r["id"] == session["id"] else " "
+                                console.print(Text(f" {marker} {r['id'][:8]}  {r.get('mode','?')}  started={r.get('started_at','')[:19]}", style=OC.text))
+                        continue
+                    if cmd == "help":
+                        from .slash import commands as _slash_cmds
+                        text = ("/exit  /context  /reset  /cost  /model [id]  "
+                                "/sessions  /project [id|new <id>]  /no-diff  /connect")
+                        console.print(Text(text, style=OC.text))
+                        console.print(Text("hub-first: " + "  ".join(f"/{c}" for c in _slash_cmds()), style=OC.textMuted))
+                        continue
+                    console.print(Text(f"unknown command: /{cmd} (try /help)", style=OC.warning))
                     continue
 
-                # ── Finalize turn ──
-                state.finalize_turn(completion.content or "")
-                stats.turns += 1
-                stats.total_cost_usd += completion.cost_usd
-                stats.total_input_tokens += completion.usage.input_tokens
-                stats.total_output_tokens += completion.usage.output_tokens
-                state.stats = stats
-                state.spinner_frame = 0
-                _render()
+            # ── User message ──
+            console.print(render_user_message(Message(role="user", content=line), state))
+            state.add_user_message(line)
 
-                # ── Background review ──
-                if stats.turns % 4 == 0:
+            # ── Context reconciliation ──
+            if config.project_root is not None:
+                try:
+                    from .context_loader import _build_tree, _git_log_oneline, _git_status
+                    fresh = RepoContext(
+                        project=repo_ctx.project, project_root=config.project_root,
+                        branch=repo_ctx.branch,
+                        git_log_lines=_git_log_oneline(config.project_root, n=10),
+                        git_status=_git_status(config.project_root),
+                        tree=_build_tree(config.project_root),
+                        relevant_files=repo_ctx.relevant_files,
+                        decisions=repo_ctx.decisions,
+                        action_summaries=repo_ctx.action_summaries,
+                        rules_summary=repo_ctx.rules_summary,
+                        host_id=repo_ctx.host_id,
+                        locations=repo_ctx.locations,
+                        parent=repo_ctx.parent,
+                    )
+                    updates = reconcile_context(epoch, fresh)
+                    for key, content in updates:
+                        hub.append_message(session["id"], role="system", content=f"[context update: {key}]\n{content}")
+                except Exception:
+                    pass
+
+            # ── Model turn ──
+            state.start_assistant_turn()
+            pending_output = Text()
+
+            seen_tool_names: set[str] = set()
+
+            def _on_chunk(delta: str) -> None:
+                nonlocal pending_output
+                if delta.startswith('{"tool_calls":'):
                     try:
-                        msgs = hub.get_messages(session["id"], limit=10)
-                        maybe_background_review(model_client, msgs, config, console)
+                        tc_list = json.loads(delta).get("tool_calls", [])
+                        for tc in tc_list:
+                            fn = tc.get("function", tc)
+                            name = fn.get("name", "?")
+                            if name not in seen_tool_names:
+                                seen_tool_names.add(name)
+                                args_raw = fn.get("arguments", {})
+                                args_str = json.dumps(args_raw) if isinstance(args_raw, dict) else str(args_raw)
+                                icon = _tool_icon(name)
+                                tc_text = Text(f"  {SPINNER_FRAMES[0]} {icon} {name}({args_str[:100]})", style=OC.text)
+                                console.print(tc_text)
+                                state.append_tool_call(name, args_str[:100])
                     except Exception:
                         pass
+                else:
+                    state.append_text(delta)
+                    pending_output.append(delta, style=OC.text)
+                    # Print chunks as they arrive
+                    console.print(delta, style=OC.text, end="")
 
-                # ── Diff loop ──
-                if diff_loop_active and config.project_root is not None:
-                    _handle_diff_blocks_tui(
-                        completion.content or "",
-                        project_root=config.project_root,
-                        console=console,
-                        print_=_print,
-                    )
+            def _extract_tool_name(detail: str, event: str) -> str:
+                if event == "call":
+                    return detail.split("(")[0]
+                if event == "result":
+                    return detail.split(":")[0]
+                if event == "blocked":
+                    return detail[len("unknown tool: "):] if detail.startswith("unknown tool: ") else detail.split(":")[0]
+                return "tool"
+
+            def _on_tool_event(event: str, detail: str) -> None:
+                nonlocal pending_output
+                if event == "result" and detail:
+                    name = _extract_tool_name(detail, event)
+                    icon = _tool_icon(name)
+                    content = detail.strip()
+                    if ":" in content.splitlines()[0] if content else False:
+                        _, _, rest = content.partition(": ")
+                        content = rest
+                    state.append_tool_result(name, content, icon)
+                    console.print(Text(f"{BAR}  {icon} {name}", style=OC.textMuted))
+                    console.print(Text(f"{BAR}  {content[:200]}", style=OC.textMuted))
+                elif event == "blocked":
+                    console.print(Text(f"blocked: {detail[:80]}", style=OC.warning))
+                elif event == "files" and detail:
+                    console.print(Text(f"files changed: {detail[:200]}", style=OC.info))
+
+            try:
+                completion = _one_turn(
+                    user_msg=line,
+                    hub=hub,
+                    model_client=model_client,
+                    session_id=session["id"],
+                    config=config,
+                    system=system,
+                    host_id=host_id,
+                    tool_registry=tool_registry,
+                    agent_mode=agent_mode,
+                    on_chunk=_on_chunk,
+                    on_tool_event=_on_tool_event,
+                )
+            except ModelError as e:
+                console.print(Text(f"model error: {e}", style=OC.error))
+                continue
+            except Exception as e:
+                console.print(Text(f"error: {e}", style=OC.error))
+                continue
+
+            # ── Finalize turn ──
+            console.print()  # newline after streaming
+            state.finalize_turn(completion.content or "")
+            stats.turns += 1
+            stats.total_cost_usd += completion.cost_usd
+            stats.total_input_tokens += completion.usage.input_tokens
+            stats.total_output_tokens += completion.usage.output_tokens
+            state.stats = stats
+            state.spinner_frame = 0
+
+            # Show footer info (C8)
+            console.print(render_status(state))
+
+            # ── Background review ──
+            if stats.turns % 4 == 0:
+                try:
+                    msgs = hub.get_messages(session["id"], limit=10)
+                    maybe_background_review(model_client, msgs, config, console)
+                except Exception:
+                    pass
+
+            # ── Diff loop ──
+            if diff_loop_active and config.project_root is not None:
+                _handle_diff_blocks_tui(
+                    completion.content or "",
+                    project_root=config.project_root,
+                    console=console,
+                    print_=_print,
+                )
 
     finally:
         pass
