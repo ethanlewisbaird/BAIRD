@@ -1,16 +1,13 @@
 """OpenCode-style TUI for `baird code` — British-flag colour theme.
 
-  ╭─ baird  project=…  host=…  branch=…  model=… ─────────────────╮
-  │                                                                 │
-  │  user> find large files in /data/ebaird                         │
-  │                                                                 │
-  │  $ find /data/ebaird -size +100M                                │
-  │  /data/ebaird/bigfile.bam                                       │
-  │                                                                 │
-  │  Found 1 file over 100MB in /data/ebaird: bigfile.bam           │
-  │                                                                 │
-  ╰─ turns: 1  cost: $0.0012  tokens: 1452→89                     ╯
-  user> _
+Ported visual patterns from opencode (https://github.com/anomalyco/opencode):
+
+  • Part-based rendering: text parts, tool-call parts, tool-result parts
+  • Compact header with left-border vertical bar
+  • Live tool-call streaming with single-char icons
+  • Tool results as bordered blocks (InlineTool / BlockTool idiom)
+  • Status bar as an inline Rule with model/cost/tokens
+  • prompt_toolkit input with slash-command autocomplete
 
 Colour theme (Union Jack):
   • Red    #C8102E — actions, prompts, emphasis
@@ -70,6 +67,11 @@ BRIT_NAVY = "#0B1D3A"
 BRIT_DIM = "#6B7C93"
 BRIT_GREEN = "#228B22"
 
+# ── opencode-style rendering helpers ──────────────────────────────────
+
+BAR = "\u2502"
+BAR_THICK = "\u2503"
+
 
 # ── prompt_toolkit autocomplete ──────────────────────────────────────
 
@@ -114,6 +116,8 @@ def _make_pt_session() -> PromptSession:
     )
 
 
+# ── opencode-style tool icons ─────────────────────────────────────────
+
 def _tool_icon(name: str) -> str:
     """Map tool name to opencode-style icon."""
     shell_like = {"run_on", "read_remote", "write_remote", "apply_diff_remote"}
@@ -148,21 +152,74 @@ def _tool_style(name: str) -> str:
     return f"{BRIT_LIGHT_BLUE}"
 
 
+# ── opencode-style header / status ────────────────────────────────────
+
+def _render_header(ctx: RepoContext, host_id, session, config: ReplConfig) -> Text:
+    """Compact status line with left-border vertical bar — opencode style."""
+    project = ctx.project.id if ctx.project else "?"
+    branch = ctx.branch or "?"
+    host = host_id or ctx.host_id or "?"
+    return Text.assemble(
+        (f"{BAR_THICK} baird  ", f"bold {BRIT_RED}"),
+        (f"project={project}  host={host}  branch={branch}  ", BRIT_WHITE),
+        (f"model={config.model}", BRIT_DIM),
+    )
+
+
+def _render_header_compact(host_id, session, config: ReplConfig) -> Text:
+    """Short header when no RepoContext is available."""
+    return Text.assemble(
+        (f"{BAR_THICK} baird  ", f"bold {BRIT_RED}"),
+        (f"project={config.project_id}  host={host_id or '?'}  ", BRIT_WHITE),
+        (f"model={config.model}", BRIT_DIM),
+    )
+
+
+def _render_status(stats: ReplStats, config: ReplConfig, completion=None) -> Rule:
+    """Status bar as an inline Rule — opencode footer-bar idiom."""
+    parts: list[tuple[str, str]] = [
+        (f"  model={config.model}  ", BRIT_DIM),
+        (f"turns={stats.turns}  ", BRIT_LIGHT_BLUE),
+        (f"cost=${stats.total_cost_usd:.4f}  ", BRIT_RED),
+        (f"tokens={stats.total_input_tokens}\u2192{stats.total_output_tokens}", BRIT_WHITE),
+    ]
+    if completion is not None:
+        parts.append((f"  last: {completion.usage.input_tokens}\u2192{completion.usage.output_tokens}", BRIT_DIM))
+        parts.append((f"  ${completion.cost_usd:.4f}", BRIT_DIM))
+    text = Text.assemble(*parts)
+    return Rule(text, style=BRIT_BLUE)
+
+
+def _tool_result_block(tool_name: str, result_text: str, icon: str, style: str) -> Panel:
+    """Render a tool result as a bordered block.
+
+    Shows the tool name/icon as panel title and result content inside
+    a rounded border — matches opencode's BlockTool idiom.
+    """
+    content = result_text.strip()
+    # Strip the leading "tool_name: " prefix that _dispatch_tool_call prepends
+    if ":" in content.splitlines()[0] if content else False:
+        prefix, _, rest = content.partition(": ")
+        content = rest
+    if not content:
+        content = "(empty result)"
+    return Panel(
+        Text(content, style=BRIT_WHITE),
+        title=f"{icon} {tool_name}",
+        title_align="left",
+        border_style=style,
+        padding=(0, 1),
+    )
+
+
+# ── form helpers (unchanged, opencode doesn't have forms) ─────────────
+
 class FormParseError(ValueError):
-    """Raised by `collect_form_values` when a pre-supplied value is obviously
-    bogus (currently: starts with `--`, i.e. looks like an unparsed flag).
-    Slash-command callers catch this and surface the message to the user."""
+    pass
 
 
 @dataclass
 class FormField:
-    """One field in a `collect_form` form.
-
-    `validator` returns an error message (string) if the value is invalid, or
-    None when it's accepted. Validators run after each prompt; on error the
-    user is re-prompted.
-    """
-
     name: str
     prompt: str
     default: str | None = None
@@ -170,9 +227,7 @@ class FormField:
     validator: Callable[[str], str | None] | None = None
 
 
-def _form_status_table(
-    fields: list[FormField], known: dict[str, str]
-) -> Table:
+def _form_status_table(fields: list[FormField], known: dict[str, str]) -> Table:
     t = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
     t.add_column("field"); t.add_column("status"); t.add_column("value", overflow="fold")
     for f in fields:
@@ -200,22 +255,6 @@ def collect_form_values(
     input_fn: Callable[[str], str],
     console: Console | None = None,
 ) -> dict[str, str]:
-    """Render a single status panel for `fields`, then prompt once for any
-    missing required field (or any field whose prompt is forced by the
-    caller via a `None` known value with a default — we just fill the default).
-
-    The flow is intentionally one-shot: if the caller already supplied a value
-    inline (the `/`-command parsing path), we don't re-prompt. Only the gaps
-    are asked about. Validators may re-prompt that one field until it passes.
-
-    Returns the merged dict. Optional unset fields with no default are absent
-    from the returned dict (callers should treat absence as "leave it alone").
-
-    Issue #2 fallback: refuse to submit when any pre-supplied value starts
-    with `--`. The slash arg parser catches this at parse time too — this
-    deeper layer means a regression in caller-side positional-merging logic
-    can't silently store a flag token as a real value.
-    """
     known = dict(known or {})
     for k, v in known.items():
         if isinstance(v, str) and v.startswith("--"):
@@ -261,6 +300,8 @@ def collect_form_values(
     return out
 
 
+# ── main TUI loop ─────────────────────────────────────────────────────
+
 def run_tui_repl(
     *,
     repo_ctx: RepoContext,
@@ -295,7 +336,6 @@ def run_tui_repl(
     epoch = build_epoch_context(repo_ctx)
     system = _system_prompt(epoch.baseline)
 
-    # Dynamic tool registry shared across the session.
     from .agent_tools import AgentMode, ToolRegistry
     tool_registry = ToolRegistry()
     agent_mode = getattr(config, "_agent_mode", AgentMode.BUILD)
@@ -303,6 +343,9 @@ def run_tui_repl(
     iterator: Iterable[str] | None = iter(inputs) if inputs is not None else None
     _use_pt = iterator is None and os.isatty(0)
     pt_session: PromptSession | None = _make_pt_session() if _use_pt else None
+
+    # Store rendered context for /context command
+    rendered: str = epoch.baseline
 
     def _print(line: Text | str) -> None:
         console.print(line)
@@ -319,23 +362,20 @@ def run_tui_repl(
 
     console.print(_render_header(repo_ctx, host_id, session, config))
     console.print(Text(
-        f"baird code — {config.project_id} — session={session['id'][:8]}",
-        style="green",
+        f"{BAR_THICK} {session['id'][:8]}", style=BRIT_DIM
     ))
-    console.print(Text("/help for commands, /exit to quit", style="dim"))
 
     try:
         while True:
             try:
                 if _use_pt:
-                    raw = _maybe_input("\nuser> ")
+                    raw = _maybe_input(f"\n{BAR} ")
                 else:
-                    raw = _maybe_input(f"\n[bold {BRIT_RED}]user[/bold {BRIT_RED}]> ")
+                    raw = _maybe_input(f"\n[{BRIT_RED}]{BAR}[/{BRIT_RED}] ")
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 break
 
-            # Multi-line `"""` block support.
             if raw.strip() == '"""':
                 buf: list[str] = []
                 while True:
@@ -353,7 +393,6 @@ def run_tui_repl(
                 continue
 
             if line.startswith("/"):
-                # First: try the hub-first slash registry (see baird/slash.py).
                 from .agent_tools import ToolEnv
                 from .slash import SlashContext
                 from .slash import try_dispatch as _try_slash
@@ -383,8 +422,6 @@ def run_tui_repl(
                             rendered, system, repo_ctx, session = swapped
                             console.print(_render_header(repo_ctx, host_id, session, config))
                     if slash_res.next_user_prompt:
-                        # Fall through to the model-turn path with the primed
-                        # prompt as the next user message.
                         line = slash_res.next_user_prompt
                     else:
                         continue
@@ -523,9 +560,7 @@ def run_tui_repl(
 
             # ── reset turn state ──
             seen_tool_names: set[str] = set()
-            tool_output_lines: list[str] = []
-            text_buf: list[str] = []
-            turn_final_content: str | None = None
+            turn_text_parts: list[str] = []
             tool_spinner_idx = 0
 
             def _on_chunk(delta: str) -> None:
@@ -550,20 +585,37 @@ def run_tui_repl(
                     except Exception:
                         pass
                 else:
-                    text_buf.append(delta)
+                    turn_text_parts.append(delta)
                     tool_spinner_idx += 1
                     if tool_spinner_idx % 80 == 0 and seen_tool_names:
                         console.out(".", style=BRIT_DIM, end="", highlight=False)
 
+            def _extract_tool_name(detail: str, event: str) -> str:
+                if event == "call":
+                    return detail.split("(")[0]
+                if event == "result":
+                    return detail.split(":")[0]
+                if event == "blocked":
+                    if detail.startswith("unknown tool: "):
+                        return detail[len("unknown tool: "):]
+                    return detail.split(":")[0]
+                return "tool"
+
             def _on_tool_event(event: str, detail: str) -> None:
                 if event == "result" and detail:
-                    preview = detail.strip().splitlines()[0][:120] if detail else ""
-                    tool_output_lines.append(preview)
-                    console.out(f"\n  {preview}", style=BRIT_DIM, highlight=False)
+                    name = _extract_tool_name(detail, event)
+                    icon = _tool_icon(name)
+                    style = _tool_style(name)
+                    block = _tool_result_block(name, detail, icon, style)
+                    console.print(block)
                 elif event == "blocked":
-                    console.out(f"\n  ! blocked: {detail[:80]}", style=f"bold {BRIT_RED}", highlight=False)
+                    _print(Text(f"\u2502  blocked: {detail[:80]}", style=f"bold {BRIT_RED}"))
+                elif event == "files" and detail:
+                    _print(Text(f"\u2502  files changed: {detail[:200]}", style=BRIT_DIM))
 
-            # Reconcile context sources that may have changed since last turn.
+            from .context_loader import render_context
+            from .diff_apply import apply_diff_to_repo
+
             if config.project_root is not None:
                 try:
                     from .context_loader import (
@@ -592,6 +644,7 @@ def run_tui_repl(
                     pass
 
             try:
+
                 completion = _one_turn(
                     user_msg=line,
                     hub=hub,
@@ -613,12 +666,11 @@ def run_tui_repl(
             was_tools = len(seen_tool_names) > 0
 
             if turn_final_content:
-                # Final answer: show it cleanly
                 lines = turn_final_content.strip().splitlines()
                 for ln in lines:
                     console.print(Text(ln, style=BRIT_WHITE))
-            elif not was_tools and text_buf:
-                console.print(Text("".join(text_buf).strip(), style=BRIT_WHITE))
+            elif not was_tools and turn_text_parts:
+                console.print(Text("".join(turn_text_parts).strip(), style=BRIT_WHITE))
 
             stats.turns += 1
             stats.total_cost_usd += completion.cost_usd
@@ -645,39 +697,7 @@ def run_tui_repl(
     return stats
 
 
-# ---------- header / status panels --------------------------------------
-
-
-def _render_header(ctx: RepoContext, host_id, session, config: ReplConfig) -> Panel:
-    project = ctx.project.id if ctx.project else "?"
-    branch = ctx.branch or "?"
-    host = host_id or ctx.host_id or "?"
-    body = (
-        f"[{BRIT_RED}]baird[/{BRIT_RED}]  "
-        f"project=[{BRIT_LIGHT_BLUE}]{project}[/{BRIT_LIGHT_BLUE}]  "
-        f"host={host}  branch={branch}  "
-        f"model=[{BRIT_DIM}]{config.model}[/{BRIT_DIM}]"
-    )
-    return Panel(body, border_style=BRIT_BLUE, padding=(0, 1))
-
-
-def _render_status(stats: ReplStats, config: ReplConfig, completion=None) -> Panel:
-    last = ""
-    if completion is not None:
-        last = (
-            f"  last: {completion.usage.input_tokens}→{completion.usage.output_tokens}"
-            f" tok / ${completion.cost_usd:.4f}"
-        )
-    body = (
-        f"turns: [{BRIT_LIGHT_BLUE}]{stats.turns}[/{BRIT_LIGHT_BLUE}]  "
-        f"cost: [{BRIT_RED}]${stats.total_cost_usd:.4f}[/{BRIT_RED}]  "
-        f"tokens: {stats.total_input_tokens}→{stats.total_output_tokens}"
-        f"{last}"
-    )
-    return Panel(body, border_style=BRIT_BLUE, padding=(0, 1))
-
-
-# ---------- /model handler ----------------------------------------------
+# ── /model handler ───────────────────────────────────────────────────
 
 
 def _handle_model_cmd(
@@ -710,10 +730,10 @@ def _handle_model_cmd(
             new_model = arg
         old = config.model
         config.model = new_model
-        print_(Text(f"model: {old} → {new_model}", style="yellow"))
+        print_(Text(f"model: {old} \u2192 {new_model}", style="yellow"))
 
 
-# ---------- modal diff approval -----------------------------------------
+# ── modal diff approval ──────────────────────────────────────────────
 
 
 def _handle_diff_blocks_tui(
@@ -730,7 +750,7 @@ def _handle_diff_blocks_tui(
         syntax = Syntax(diff, "diff", theme="monokai", line_numbers=False)
         modal = Panel(
             syntax,
-            title=f"diff {i}/{len(blocks)}  —  apply? [y/N/e/q]",
+            title=f"diff {i}/{len(blocks)}  \u2014  apply? [y/N/e/q]",
             border_style="yellow",
         )
         console.print(modal)
@@ -763,8 +783,6 @@ def _handle_diff_blocks_tui(
 
 
 def _edit_diff(diff: str) -> str:
-    """Open `$EDITOR` (default vi) on the diff text and return the edited
-    body, or an empty string if the user saved an empty file."""
     editor = os.environ.get("EDITOR", "vi")
     with tempfile.NamedTemporaryFile(mode="w", suffix=".diff", delete=False) as f:
         f.write(diff)
