@@ -327,7 +327,10 @@ def run_tui_repl(
     try:
         while True:
             try:
-                raw = _maybe_input(f"\n[bold {BRIT_RED}]user[/bold {BRIT_RED}]> ")
+                if _use_pt:
+                    raw = _maybe_input("\nuser> ")
+                else:
+                    raw = _maybe_input(f"\n[bold {BRIT_RED}]user[/bold {BRIT_RED}]> ")
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 break
@@ -434,6 +437,16 @@ def run_tui_repl(
                                 _print(Text("switch: /project <id>   create: /project new <id> [name]", style="dim"))
                             continue
                         sub = parts[1]
+                        if sub == "list":
+                            rows = hub.list_projects()
+                            if not rows:
+                                _print(Text("no projects on the hub", style="dim"))
+                            else:
+                                for r in rows:
+                                    marker = "*" if r["id"] == config.project_id else " "
+                                    _print(Text(f" {marker} {r['id']}  {r.get('name','')}", style="cyan"))
+                                _print(Text("switch: /project <id>   create: /project new <id> [name]", style="dim"))
+                            continue
                         if sub == "new":
                             if len(parts) < 3:
                                 _print(Text("usage: /project new <id> [name]", style="red"))
