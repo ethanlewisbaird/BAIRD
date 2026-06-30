@@ -35,6 +35,12 @@ export function App() {
         });
         return;
       }
+      if (event.kind === 'status' && event.text) {
+        // Show status output as messages in the chat
+        const ss = useSessionStore.getState();
+        ss.dispatchEvent({ kind: 'user_message', text: event.text } as never);
+        return;
+      }
       useSessionStore.getState().dispatchEvent(event);
     };
     const onExit = (_code: number | null) => {
