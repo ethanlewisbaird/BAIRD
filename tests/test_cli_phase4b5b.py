@@ -101,6 +101,6 @@ def test_code_uses_repl(
 
     monkeypatch.setattr(model_mod, "OpenRouterClient", factory)
 
-    r = runner.invoke(cli_mod.app, ["code"], input="hello\n/exit\n")
+    r = runner.invoke(cli_mod.app, ["code", "--no-tui"], input="hello\n/exit\n")
     assert r.exit_code == 0, r.output
     assert "stub reply" in r.output

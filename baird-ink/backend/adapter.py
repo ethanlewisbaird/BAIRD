@@ -293,7 +293,6 @@ def _main() -> None:
         if diff_loop_active and config.project_root is not None:
             from baird.diff_apply import DiffApplyError, apply_diff_to_repo
             from baird.repl import extract_diff_blocks
-            from baird.tui_keys import read_key
 
             blocks = extract_diff_blocks(completion.content or "")
             for i, diff in enumerate(blocks, 1):

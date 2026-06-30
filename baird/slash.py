@@ -35,7 +35,7 @@ from .project_enrich import (
     probe_location,
     propose_enrichment,
 )
-from .tui import FormField, collect_form_values
+from .forms import FormField, collect_form_values
 
 
 @dataclass
@@ -1304,7 +1304,7 @@ def try_dispatch(line: str, ctx: SlashContext) -> SlashResult | None:
     if not tokens:
         return None
     # Try two-word verbs first, then one-word.
-    from .tui import FormParseError
+    from .forms import FormParseError
 
     for verb_len in (2, 1):
         if len(tokens) < verb_len:

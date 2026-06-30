@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from baird.tui import FormField, collect_form_values
+from baird.forms import FormField, collect_form_values
 
 
 def _stub_input(answers: list[str]):

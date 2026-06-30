@@ -573,7 +573,7 @@ def test_collect_form_values_rejects_flag_value_in_known() -> None:
     """The collect_form_values fallback raises FormParseError when a
     pre-supplied value starts with '--' — defends against any caller path
     that bypasses the slash parser's check."""
-    from baird.tui import FormField, FormParseError, collect_form_values
+    from baird.forms import FormField, FormParseError, collect_form_values
 
     fields = [FormField("name", "name", required=True)]
     with pytest.raises(FormParseError) as ei:
