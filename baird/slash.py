@@ -747,7 +747,12 @@ _AUDIT_PROMPT_TEMPLATE = (
     "`role` argument to `add_project_location`. For family trees, first "
     "register the parent, then register each child with `parent_id` set "
     "to the parent's id (the hub enforces parent/child; parent must exist "
-    "first)."
+    "first).\n\n"
+    "IMPORTANT: If the user replies with corrections or alternative choices "
+    "(\"this one should be individual\", \"use X as parent for Y and Z\", "
+    "etc.), treat that as an instruction to proceed: register the projects "
+    "with the user's modifications, not your original proposal. You don't "
+    "need to ask again — just acknowledge and execute."
 )
 
 
