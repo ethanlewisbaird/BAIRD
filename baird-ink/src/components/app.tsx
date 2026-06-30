@@ -22,7 +22,45 @@ export function App() {
 
   const adapterRef = useRef<BackendAdapter | null>(null);
 
-  // ── Backend adapter lifecycle ──
+  /**
+ * Read one line from stdin in cooked mode, temporarily detaching Ink's
+ * stdin listener so pasted text goes only to us.
+ */
+function readLineCooked(): Promise<string> {
+  return new Promise((resolve) => {
+    const { stdin } = process;
+    // Find Ink's internal data listener so we can detach it temporarily
+    const inkListeners = stdin.listeners('data') as ((chunk: Buffer) => void)[];
+    for (const fn of inkListeners) {
+      stdin.removeListener('data', fn);
+    }
+
+    const wasRaw = stdin.isRaw;
+    if (stdin.setRawMode) {
+      stdin.setRawMode(false);
+    }
+    stdin.resume();
+
+    let buf = '';
+    const onData = (chunk: Buffer) => {
+      buf += chunk.toString('utf-8');
+      if (buf.includes('\n') || buf.includes('\r')) {
+        if (stdin.setRawMode && wasRaw) {
+          stdin.setRawMode(true);
+        }
+        stdin.removeListener('data', onData);
+        // Re-attach Ink's listeners
+        for (const fn of inkListeners) {
+          stdin.on('data', fn);
+        }
+        resolve(buf.replace(/\r?\n$/, ''));
+      }
+    };
+    stdin.on('data', onData);
+  });
+}
+
+// ── Backend adapter lifecycle ──
   useEffect(() => {
     const onEvent = (event: BackendEvent) => {
       if (event.kind === 'dialog') {
@@ -111,6 +149,15 @@ export function App() {
       }
       // Text-input dialog (Escape ignored — bracketed paste conflict)
       if (key.ctrl && _input === 'c') { process.exit(0); return; }
+      if (key.ctrl && _input === 'p') {
+        useUIStore.getState().setDialog(null);
+        readLineCooked().then((pasted) => {
+          if (pasted) {
+            adapterRef.current?.sendDialogChoice(pasted);
+          }
+        });
+        return;
+      }
       if (key.return) {
         const text = inputRef.current.trim();
         if (text) {
@@ -138,6 +185,12 @@ export function App() {
       if (_input === 't') { useUIStore.getState().toggleTimestamps(); return; }
       if (_input === 'e') { useUIStore.getState().toggleExpandAll(); return; }
       if (_input === 'c') { process.exit(0); return; }
+      if (_input === 'p') {
+        readLineCooked().then((pasted) => {
+          if (pasted) setInputValue(pasted);
+        });
+        return;
+      }
       return;
     }
     if (key.pageUp) { useUIStore.getState().scrollUp(); return; }

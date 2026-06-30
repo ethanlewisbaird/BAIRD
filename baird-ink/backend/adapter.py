@@ -275,12 +275,43 @@ def _main() -> None:
         session = hub.find_or_create_session_for_task(task_id=f"repl-{target_id}", project_id=target_id, mode="code")
         _emit({"kind": "status", "text": f"switched to project {target_id}  session={session['id'][:8]}"})
 
-    def _cmd_connect() -> None:
+    def _save_connect_key(provider: tuple[str, str, str], key: str) -> None:
+        label, env_var, _url = provider
+        if not key.strip():
+            _emit({"kind": "error", "text": "no key provided"})
+            return
+        from baird.paths import secrets_env_path
+        env_path = secrets_env_path()
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict[str, str] = {}
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    existing[k.strip()] = v.strip()
+        existing[env_var] = key.strip()
+        env_path.write_text("\n".join(f"{k}={v}" for k, v in sorted(existing.items())) + "\n")
+        env_path.chmod(0o600)
+        os.environ[env_var] = key.strip()
+        _emit({"kind": "status", "text": f"connected to {label} — key saved"})
+
+    def _cmd_connect(args: list[str] | None = None) -> None:
         providers = [
             ("OpenRouter", "OPENROUTER_API_KEY", "https://openrouter.ai/keys"),
             ("OpenCode Zen", "OPENCODE_API_KEY", "https://opencode.ai/auth (free tier)"),
             ("OpenCode Go", "OPENCODE_API_KEY", "https://opencode.ai/auth (subscription)"),
         ]
+
+        # Non-interactive: /connect <number> <key>
+        if args and len(args) >= 2 and args[0].isdigit():
+            idx = int(args[0]) - 1
+            if 0 <= idx < len(providers):
+                _save_connect_key(providers[idx], " ".join(args[1:]))
+                return
+            _emit({"kind": "error", "text": f"invalid provider: {args[0]}"})
+            return
+
         _emit({
             "kind": "dialog",
             "id": "connect_provider",
@@ -318,23 +349,7 @@ def _main() -> None:
             _emit({"kind": "error", "text": "no key provided — cancelled"})
             return
 
-        # Save to secrets.env
-        from baird.paths import secrets_env_path
-        env_path = secrets_env_path()
-        env_path.parent.mkdir(parents=True, exist_ok=True)
-        existing: dict[str, str] = {}
-        if env_path.exists():
-            for line in env_path.read_text().splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    existing[k.strip()] = v.strip()
-        existing[env_var] = key
-        env_path.write_text("\n".join(f"{k}={v}" for k, v in sorted(existing.items())) + "\n")
-        env_path.chmod(0o600)
-        os.environ[env_var] = key
-
-        _emit({"kind": "status", "text": f"connected to {label} — key saved"})
+        _save_connect_key((label, env_var, url), key)
 
     # ── Main loop ──
     diff_loop_active = True
@@ -375,7 +390,7 @@ def _main() -> None:
                 _cmd_project(rest)
                 continue
             elif cmd == "connect":
-                _cmd_connect()
+                _cmd_connect(rest)
                 continue
             elif cmd == "no-diff" or cmd == "nodiff":
                 diff_loop_active = False
