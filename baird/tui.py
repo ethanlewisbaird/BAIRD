@@ -22,6 +22,7 @@ resume — all the existing REPL features carry over.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -412,10 +413,26 @@ def run_tui_repl(
             console.print(Rule(style="dim"))
             streamed_any = False
 
+            text_buf: list[str] = []
+            tool_call_log: list[dict] = []
+
             def _on_chunk(delta: str) -> None:
                 nonlocal streamed_any
                 streamed_any = True
-                console.out(delta, end="", highlight=False)
+                # Tool calls arrive as JSON {"tool_calls": [...]}
+                if delta.startswith('{"tool_calls":'):
+                    try:
+                        tc_list = json.loads(delta).get("tool_calls", [])
+                        for tc in tc_list:
+                            fn = tc.get("function", tc)
+                            name = fn.get("name", "?")
+                            args_raw = fn.get("arguments", {})
+                            args_str = json.dumps(args_raw) if isinstance(args_raw, dict) else str(args_raw)
+                            tool_call_log.append({"name": name, "args": args_str[:120]})
+                    except Exception:
+                        pass
+                else:
+                    text_buf.append(delta)
 
             # Reconcile context sources that may have changed since last turn.
             # Injects any detected changes as system messages in the session so
@@ -463,8 +480,13 @@ def run_tui_repl(
             except ModelError as e:
                 _print(Text(f"model error: {e}", style="red"))
                 continue
-            if streamed_any:
-                console.print()
+            if tool_call_log:
+                for tc in tool_call_log:
+                    _print(Text(f"  \u2699 {tc['name']}({tc['args'][:80]})", style="blue"))
+                if completion.content:
+                    console.print(completion.content)
+            elif streamed_any:
+                console.print("".join(text_buf))
             else:
                 console.print(completion.content)
             stats.turns += 1

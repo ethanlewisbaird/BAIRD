@@ -592,7 +592,10 @@ def run_repl(
             console.print(f"[red]model error:[/red] {e}")
             continue
 
-        console.print(completion.content)
+        if completion.content and not completion.tool_calls:
+            console.print(completion.content)
+        elif completion.content:
+            console.print(f"[dim]{completion.content}[/dim]")
         console.print(
             f"[dim]model={completion.model}  "
             f"tokens={completion.usage.input_tokens}→{completion.usage.output_tokens}  "
