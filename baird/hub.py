@@ -244,15 +244,19 @@ def create_app(hub_cfg: Optional[HubConfig] = None) -> FastAPI:
         if not found:
             lines.append(f"SATELLITE_PORT={payload.satellite_port}")
         env_file.write_text("\n".join(lines) + "\n")
-        subprocess.run(
+        r = subprocess.run(
             ["systemctl", "--user", "restart", f"baird-tunnel@{ssh_host}"],
             capture_output=True,
             timeout=30,
         )
+        if r.returncode != 0:
+            stderr = r.stderr.decode().strip() if r.stderr else ""
+            log.warning("tunnel restart for %s failed: %s", ssh_host, stderr)
         return {
-            "status": "ok",
+            "status": "ok" if r.returncode == 0 else "restart_failed",
             "host_id": payload.host_id,
             "satellite_port": payload.satellite_port,
+            "tunnel_restart_stderr": stderr if r.returncode != 0 else None,
         }
 
     # ---- Phase 2 routes (registered from sibling module) ----

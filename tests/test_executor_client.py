@@ -42,10 +42,13 @@ def test_run_command_packages_overrides(
     captured: dict = {}
 
     class _FakeClient:
-        def post(self, url, json=None):
+        def request(self, method, url, json=None):
             captured["url"] = url
             captured["json"] = json
             return _FakeResp({"exit_code": 0, "stdout": "", "stderr": "", "tier": "project"})
+
+        def post(self, url, json=None):
+            return self.request("POST", url, json=json)
 
         def close(self):
             pass

@@ -9,6 +9,8 @@ Used by the orchestrator-side dispatcher when a task's `runnable.host_id` ≠ hu
 
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,34 @@ import httpx
 
 from .permissions import overrides_from_project_yaml
 from .project_yaml import load_project_yaml
+
+
+log = logging.getLogger(__name__)
+
+# Transport errors worth retrying — SSH tunnels can briefly drop during reconnect.
+_RETRYABLE = (
+    httpx.ConnectError,
+    httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+    httpx.TransportError,
+)
+
+
+def _executor_retry(op, *, attempts=3, backoff_s=(1.0, 3.0), label=""):
+    """Call `op`; on retryable network errors sleep + retry up to `attempts`."""
+    for i in range(attempts):
+        try:
+            return op()
+        except _RETRYABLE as e:
+            remaining = attempts - i - 1
+            if remaining == 0:
+                raise
+            wait = backoff_s[min(i, len(backoff_s) - 1)]
+            log.warning(
+                "executor_client: %s failed (%s); retrying in %.1fs (%d left)",
+                label or "call", e.__class__.__name__, wait, remaining,
+            )
+            time.sleep(wait)
 
 
 def _load_overrides(project_root: Path | str | None) -> list[dict]:
@@ -62,15 +92,19 @@ class ExecutorClient:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def _call(self, method: str, path: str, json: dict | None = None) -> Any:
+        """POST with retry on transport errors."""
+        def _do():
+            r = self._client.request(method, path, json=json)
+            r.raise_for_status()
+            return r.json()
+        return _executor_retry(_do, label=f"{method} {path}")
+
     def health(self) -> dict:
-        r = self._client.get("/exec/health")
-        r.raise_for_status()
-        return r.json()
+        return self._call("GET", "/exec/health")
 
     def read_file(self, path: str) -> dict:
-        r = self._client.post("/exec/read_file", json={"path": path})
-        r.raise_for_status()
-        return r.json()
+        return self._call("POST", "/exec/read_file", json={"path": path})
 
     def write_file(
         self,
@@ -80,17 +114,12 @@ class ExecutorClient:
         project_root: str | None = None,
         create_parents: bool = True,
     ) -> dict:
-        r = self._client.post(
-            "/exec/write_file",
-            json={
-                "path": path,
-                "content": content,
-                "project_root": project_root,
-                "create_parents": create_parents,
-            },
-        )
-        r.raise_for_status()
-        return r.json()
+        return self._call("POST", "/exec/write_file", json={
+            "path": path,
+            "content": content,
+            "project_root": project_root,
+            "create_parents": create_parents,
+        })
 
     def run_command(
         self,
@@ -109,9 +138,7 @@ class ExecutorClient:
             "project_root": str(project_root) if project_root else None,
             "project_overrides": _load_overrides(project_root),
         }
-        r = self._client.post("/exec/run_command", json=body)
-        r.raise_for_status()
-        return r.json()
+        return self._call("POST", "/exec/run_command", json=body)
 
     def apply_diff(
         self,
@@ -121,14 +148,9 @@ class ExecutorClient:
         commit_message: str,
         allow_dirty_outside_targets: bool = True,
     ) -> dict:
-        r = self._client.post(
-            "/exec/apply_diff",
-            json={
-                "diff": diff,
-                "project_root": project_root,
-                "commit_message": commit_message,
-                "allow_dirty_outside_targets": allow_dirty_outside_targets,
-            },
-        )
-        r.raise_for_status()
-        return r.json()
+        return self._call("POST", "/exec/apply_diff", json={
+            "diff": diff,
+            "project_root": project_root,
+            "commit_message": commit_message,
+            "allow_dirty_outside_targets": allow_dirty_outside_targets,
+        })
