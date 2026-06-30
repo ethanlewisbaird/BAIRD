@@ -109,17 +109,13 @@ def _run_ink_tui(config) -> None:  # noqa: ANN001
             raise typer.Exit(1)
 
     # Resolve the correct Python command (venv-aware)
-    python_cmd = os.environ.get("BAIRD_PYTHON_CMD") or sys.executable
-    if "uv" not in python_cmd:
-        try:
-            result = subprocess.run(
-                ["uv", "run", "which", "python"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                python_cmd = result.stdout.strip()
-        except Exception:
-            pass  # keep default
+    # Priority: 1. .venv/bin/python in BAIRD root  2. uv run python  3. sys.executable
+    baird_root = Path(__file__).resolve().parent.parent
+    venv_python = baird_root / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        python_cmd = str(venv_python)
+    else:
+        python_cmd = "uv run python"
 
     env = {
         **os.environ,
