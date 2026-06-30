@@ -1162,6 +1162,76 @@ def cmd_project_delete(parts: list[str], ctx: SlashContext) -> SlashResult:
 # ---- Registry --------------------------------------------------------
 
 
+# ---- /connect -------------------------------------------------------------
+
+
+_PROVIDERS: list[tuple[str, str, str]] = [
+    # (label, env_var, description)
+    ("OpenRouter",     "OPENROUTER_API_KEY", "https://openrouter.ai/keys"),
+    ("OpenCode Zen",   "OPENCODE_API_KEY",   "https://opencode.ai/auth"),
+]
+
+
+def cmd_connect(args: list[str], ctx: SlashContext) -> SlashResult:
+    """Interactively connect an API provider (OpenRouter, OpenCode Zen, …).
+
+    Prompts for provider selection and API key, saves to secrets.env,
+    and sets the env var for the current session.
+    """
+    import os
+
+    # Show providers with indices
+    lines = ["available providers:"]
+    for i, (label, _env, url) in enumerate(_PROVIDERS, 1):
+        lines.append(f"  {i}. {label}  ({url})")
+    if ctx.console:
+        ctx.console.print("\n".join(lines))
+        provider_idx_s = ctx.input_fn("select provider [1-{}]: ".format(len(_PROVIDERS))).strip()
+    else:
+        provider_idx_s = ""
+
+    try:
+        idx = int(provider_idx_s) - 1
+        if idx < 0 or idx >= len(_PROVIDERS):
+            return SlashResult(handled=True, ok=False, output="invalid selection")
+    except (ValueError, IndexError):
+        return SlashResult(handled=True, ok=False, output="invalid selection")
+
+    label, env_var, url = _PROVIDERS[idx]
+
+    if ctx.console:
+        ctx.console.print(f"get your API key from: [cyan underline]{url}[/cyan underline]")
+    key = ctx.input_fn(f"paste your {label} API key: ").strip()
+    if not key:
+        return SlashResult(handled=True, ok=False, output="no key provided — cancelled")
+
+    # Save to secrets.env
+    from .paths import secrets_env_path
+
+    env_path = secrets_env_path()
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict[str, str] = {}
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                existing[k.strip()] = v.strip()
+    existing[env_var] = key
+    env_path.write_text(
+        "\n".join(f"{k}={v}" for k, v in sorted(existing.items())) + "\n"
+    )
+    env_path.chmod(0o600)
+
+    # Set for current session
+    os.environ[env_var] = key
+
+    return SlashResult(
+        handled=True,
+        output=f"connected to {label} — key saved to {env_path}",
+    )
+
+
 # ---- MCP commands ------------------------------------------------------
 
 
@@ -1195,6 +1265,7 @@ def cmd_mcp_disconnect(args: list[str], ctx: SlashContext) -> SlashResult:
 
 
 _COMMANDS: dict[str, HandlerFn] = {
+    "connect": cmd_connect,
     "project new": cmd_project_new,
     "project rename": cmd_project_rename,
     "project delete": cmd_project_delete,

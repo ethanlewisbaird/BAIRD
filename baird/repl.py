@@ -22,10 +22,9 @@ from __future__ import annotations
 
 import json as _json
 import re
-import sys
 import uuid
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -37,7 +36,7 @@ from .context_loader import RepoContext
 from .diff_apply import DiffApplyError, apply_diff_to_repo
 from .memory_client import HubClient
 from .model import Completion, ModelError, OpenRouterClient
-
+from .theme import OC
 
 # ---- Git snapshot helpers -----------------------------------------------
 
@@ -219,7 +218,7 @@ class ReplStats:
 @dataclass
 class ReplConfig:
     project_id: str
-    model: str = "openrouter/owl-alpha"
+    model: str = "opencode/deepseek-v4-flash-free"
     max_tokens: int = 1024
     temperature: float = 0.2
     history_cap: int = HISTORY_TURN_CAP
@@ -324,16 +323,17 @@ def run_repl(
 
     # Dynamic tool registry shared across the session.
     from .agent_tools import AgentMode, ToolRegistry
+
     tool_registry = ToolRegistry()
     agent_mode = AgentMode.BUILD if config.agent_mode == "build" else AgentMode.PLAN
     system = _system_prompt(epoch.baseline, mode=agent_mode)
     console.print(
         Panel.fit(
-            f"[#C8102E]baird code[/#C8102E]  "
-            f"project=[#1D70B8]{config.project_id}[/#1D70B8]  "
-            f"model=[#6B7C93]{config.model}[/#6B7C93]\n"
+            f"[{OC.primary}]baird code[/{OC.primary}]  "
+            f"project=[{OC.secondary}]{config.project_id}[/{OC.secondary}]  "
+            f"model=[{OC.textMuted}]{config.model}[/{OC.textMuted}]\n"
             f"session={session['id'][:8]}  /help for commands, /exit to quit",
-            border_style="#012169",
+            border_style=OC.backgroundElement,
         )
     )
 
@@ -376,7 +376,8 @@ def run_repl(
             # when the line doesn't match a registered verb, in which case
             # the legacy REPL-internal commands below take a turn.
             from .agent_tools import ToolEnv, ToolRegistry
-            from .slash import SlashContext, try_dispatch as _try_slash
+            from .slash import SlashContext
+            from .slash import try_dispatch as _try_slash
 
             slash_ctx = SlashContext(
                 hub=hub,
@@ -389,7 +390,7 @@ def run_repl(
             slash_res = _try_slash(line[1:], slash_ctx)
             if slash_res is not None:
                 if slash_res.output:
-                    style = "green" if slash_res.ok else "red"
+                    style = OC.success if slash_res.ok else OC.error
                     console.print(f"[{style}]{slash_res.output}[/{style}]")
                 if slash_res.active_host:
                     config._active_host = slash_res.active_host  # type: ignore[attr-defined]
@@ -558,7 +559,7 @@ def run_repl(
 
                     console.print(
                         "[dim]/exit  /context  /reset  /cost  /model [id]  "
-                        "/sessions  /project [id|new <id>]  /no-diff[/dim]"
+                        "/sessions  /project [id|new <id>]  /no-diff  /connect[/dim]"
                     )
                     console.print(
                         "[dim]hub-first: "
@@ -571,13 +572,13 @@ def run_repl(
 
         def _on_tool_event(event: str, detail: str) -> None:
             if event == "call":
-                console.print(f"[bold #C8102E]  $[/bold #C8102E] {detail}")
+                console.print(f"[{OC.textMuted}]  $[/{OC.textMuted}] {detail}")
             elif event == "result":
                 preview = detail.strip().splitlines()[0][:120] if detail else ""
                 if preview:
-                    console.print(f"[#6B7C93]{preview}[/#6B7C93]")
+                    console.print(f"[{OC.textMuted}]{preview}[/{OC.textMuted}]")
             elif event == "blocked":
-                console.print(f"[bold #C8102E]  ![/bold #C8102E] {detail[:100]}")
+                console.print(f"[{OC.error}]  ![/{OC.error}] {detail[:100]}")
 
         # Reconcile context sources that may have changed since last turn.
         # Injects any detected changes as system messages in the session so
@@ -585,8 +586,9 @@ def run_repl(
         if config.project_root is not None:
             try:
                 from .context_loader import (
-                    _git_log_oneline, _git_status, _build_tree,
-                    GIT_LOG_SOURCE, GIT_STATUS_SOURCE, TREE_SOURCE,
+                    _build_tree,
+                    _git_log_oneline,
+                    _git_status,
                 )
                 fresh = RepoContext(
                     # Minimal — only the fields used by tracked sources
@@ -707,11 +709,8 @@ def _one_turn(
     included in the tool event stream when `on_tool_event` is provided.
     """
     from .agent_tools import (
-        AgentMode,
         ApprovalGate,
         ToolEnv,
-        ToolRegistry,
-        dispatch,
         tools_openai_schema,
     )
     from .context_compressor import load_history_with_summary
@@ -1055,7 +1054,7 @@ def _handle_diff_blocks(
             Panel(
                 Syntax(diff, "diff", line_numbers=False, word_wrap=True),
                 title=f"proposed diff {i}/{len(blocks)}",
-                border_style="cyan",
+                border_style=OC.info,
             )
         )
         try:

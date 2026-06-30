@@ -214,6 +214,8 @@ def maybe_background_review(
     def _review():
         try:
             from .model import ModelError
+            from .theme import OC as _OC
+
             completion = model_client.complete(
                 model=config.model,
                 messages=recent,
@@ -223,7 +225,7 @@ def maybe_background_review(
             )
             content = (completion.content or "").strip()
             if content and "Nothing to save" not in content and console:
-                console.print(f"\n  \U0001f4be {content[:200]}", style="#6B7C93")
+                console.print(f"\n  \U0001f4be {content[:200]}", style=_OC.textMuted)
         except (ModelError, Exception) as e:
             log.debug("background review skipped: %s", e)
 

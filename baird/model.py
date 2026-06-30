@@ -1,12 +1,8 @@
-"""OpenRouter client — Phase 4 model substrate.
+"""Multi-provider model client — OpenRouter + OpenCode Zen.
 
-Single backend for now: OpenRouter. Sync HTTP, no streaming (streaming lands
-when the TUI needs it). Returns a `Completion` carrying content, usage
-counters, and an estimated cost in USD.
-
-Pricing: OpenRouter returns per-call cost in the response when the
-`include` query parameter is set; we ask for it. If the field is missing we
-fall back to a static price table keyed on the model id — easy to update.
+Two backends:
+  - OpenRouter (default): `openrouter/` prefixed model IDs, `OPENROUTER_API_KEY`
+  - OpenCode Zen:        `opencode/` prefixed model IDs, `OPENCODE_API_KEY`
 
 The transport is pluggable for tests: pass a `transport=` callable accepting
 the request dict and returning the response dict.
@@ -36,6 +32,7 @@ DEFAULT_PRICING: dict[str, tuple[float, float]] = {
 # Prefix priority list for building a curated "popular models" view from the
 # live OpenRouter catalog. Order = display order. First match wins per model.
 POPULAR_PREFIXES: tuple[str, ...] = (
+    "opencode/",
     "anthropic/claude-opus",
     "openrouter/",
     "anthropic/claude-sonnet",
@@ -101,11 +98,30 @@ def fetch_openrouter_catalog(timeout: float = 5.0) -> list[dict[str, Any]]:
     return r.json().get("data", [])
 
 
+def fetch_opencode_catalog(timeout: float = 5.0) -> list[dict[str, Any]]:
+    """Fetch the OpenCode Zen model catalog. No auth required."""
+    r = httpx.get("https://opencode.ai/zen/v1/models", timeout=timeout)
+    r.raise_for_status()
+    # Zen models are returned bare (e.g. "deepseek-v4-flash");
+    # prefix them with "opencode/" so the rest of BAIRD treats them
+    # consistently.
+    raw = r.json()
+    models: list[dict[str, Any]] = raw if isinstance(raw, list) else raw.get("data", [])
+    for m in models:
+        mid = m.get("id", "")
+        if mid and not mid.startswith("opencode/"):
+            m["id"] = f"opencode/{mid}"
+    return models
+
+
 def top_openrouter_models(
     catalog: list[dict[str, Any]] | None = None, n: int = 20
 ) -> list[dict[str, Any]]:
-    """Pick the top N popular models from the catalog (or fetched live)."""
-    cat = catalog if catalog is not None else fetch_openrouter_catalog()
+    """Pick the top N popular models from the catalogs (or fetched live).
+
+    Merges OpenRouter and OpenCode Zen catalogs, deduplicating by ID.
+    """
+    cat = catalog if catalog is not None else _merged_catalog()
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
     for prefix in POPULAR_PREFIXES:
@@ -119,6 +135,23 @@ def top_openrouter_models(
                 if len(out) >= n:
                     return out
     return out
+
+
+def _merged_catalog() -> list[dict[str, Any]]:
+    """Merge OpenRouter + OpenCode Zen catalogs."""
+    from_path = fetch_openrouter_catalog()
+    try:
+        zen = fetch_opencode_catalog()
+    except Exception:
+        zen = []
+    seen_ids = {m.get("id", "") for m in from_path}
+    merged = list(from_path)
+    for m in zen:
+        mid = m.get("id", "")
+        if mid and mid not in seen_ids:
+            seen_ids.add(mid)
+            merged.append(m)
+    return merged
 
 
 @dataclass
@@ -147,10 +180,11 @@ class ModelError(RuntimeError):
 
 
 class OpenRouterClient:
-    """OpenRouter HTTP client.
+    """Multi-provider model client.
 
-    By default reads `OPENROUTER_API_KEY` from env. Pass `transport=` to
-    bypass the network entirely in tests.
+    Routes `opencode/*` models to OpenCode Zen (`OPENCODE_API_KEY`) and
+    everything else to OpenRouter (`OPENROUTER_API_KEY`). Pass `transport=`
+    to bypass the network entirely in tests.
     """
 
     BASE = "https://openrouter.ai/api/v1"
@@ -163,7 +197,8 @@ class OpenRouterClient:
         transport: Transport | None = None,
         pricing: dict[str, tuple[float, float]] | None = None,
     ):
-        self._key = api_key or os.getenv("OPENROUTER_API_KEY")
+        self._openrouter_key = api_key or os.getenv("OPENROUTER_API_KEY")
+        self._opencode_key = os.getenv("OPENCODE_API_KEY")
         self._timeout = timeout
         self._transport = transport
         self._pricing = pricing or DEFAULT_PRICING
@@ -319,6 +354,22 @@ class OpenRouterClient:
 
     # --- internals -------------------------------------------------------
 
+    # --- backend helpers ---------------------------------------------------
+
+    @staticmethod
+    def _backend_for(model: str) -> tuple[str, str]:
+        """Return (base_url, api_key_env_name) for a model ID prefix."""
+        if model.startswith("opencode/"):
+            return ("https://opencode.ai/zen/v1", "OPENCODE_API_KEY")
+        return ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY")
+
+    def _key_for(self, model: str) -> str:
+        """Return the API key appropriate for the model's backend."""
+        _, env = self._backend_for(model)
+        if env == "OPENCODE_API_KEY":
+            return self._opencode_key or os.getenv("OPENCODE_API_KEY", "") or ""
+        return self._openrouter_key or os.getenv("OPENROUTER_API_KEY", "") or ""
+
     def _build_messages(
         self, messages: list[dict[str, Any]], *, system: str | None
     ) -> list[dict[str, Any]]:
@@ -329,15 +380,23 @@ class OpenRouterClient:
         return out
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        model = body.get("model", "unknown")
         if self._transport is not None:
             return self._transport({"path": path, "body": body})
-        if not self._key:
-            raise ModelError("OPENROUTER_API_KEY not set and no transport supplied")
+        base, env = self._backend_for(model)
+        key = self._key_for(model)
+        if not key:
+            raise ModelError(
+                f"{env} not set and no transport supplied (needed for model {model})"
+            )
+        # Strip provider prefix for the API call (Zen models are passed bare)
+        api_model = model.removeprefix("opencode/")
+        body = {**body, "model": api_model}
         with httpx.Client(timeout=self._timeout) as client:
             r = client.post(
-                f"{self.BASE}{path}",
+                f"{base}{path}",
                 headers={
-                    "Authorization": f"Bearer {self._key}",
+                    "Authorization": f"Bearer {key}",
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://github.com/ethanlewisbaird/BAIRD",
                     "X-Title": "BAIRD",
@@ -345,23 +404,37 @@ class OpenRouterClient:
                 json=body,
             )
             if r.status_code >= 400:
-                raise ModelError(f"openrouter {r.status_code}: {r.text[:500]}")
+                backend_name = "opencode" if env == "OPENCODE_API_KEY" else "openrouter"
+                hint = ""
+                if r.status_code == 401 and env == "OPENCODE_API_KEY":
+                    hint = " (set OPENCODE_API_KEY in your environment)"
+                elif r.status_code == 401 and env == "OPENROUTER_API_KEY":
+                    hint = " (set OPENROUTER_API_KEY in your environment)"
+                raise ModelError(f"{backend_name} {r.status_code}: {r.text[:500]}{hint}")
             return r.json()
 
     def _stream_post(self, path: str, body: dict[str, Any]):
         """Yield raw SSE lines. With a `transport`, the transport returns an
-        iterator. Without one, hits OpenRouter directly with `stream=True`."""
+        iterator. Without one, hits the API directly with `stream=True`."""
+        model = body.get("model", "unknown")
         if self._transport is not None:
             return self._transport({"path": path, "body": body, "stream": True})
-        if not self._key:
-            raise ModelError("OPENROUTER_API_KEY not set and no transport supplied")
+        base, env = self._backend_for(model)
+        key = self._key_for(model)
+        if not key:
+            raise ModelError(
+                f"{env} not set and no transport supplied (needed for model {model})"
+            )
+        api_model = model.removeprefix("opencode/")
+        body = {**body, "model": api_model}
 
         def _gen():
+            backend_name = "opencode" if env == "OPENCODE_API_KEY" else "openrouter"
             with httpx.stream(
                 "POST",
-                f"{self.BASE}{path}",
+                f"{base}{path}",
                 headers={
-                    "Authorization": f"Bearer {self._key}",
+                    "Authorization": f"Bearer {key}",
                     "Content-Type": "application/json",
                     "Accept": "text/event-stream",
                     "HTTP-Referer": "https://github.com/ethanlewisbaird/BAIRD",
@@ -371,7 +444,12 @@ class OpenRouterClient:
                 timeout=self._timeout,
             ) as r:
                 if r.status_code >= 400:
-                    raise ModelError(f"openrouter {r.status_code}")
+                    hint = ""
+                    if r.status_code == 401 and env == "OPENCODE_API_KEY":
+                        hint = " (set OPENCODE_API_KEY in your environment)"
+                    elif r.status_code == 401 and env == "OPENROUTER_API_KEY":
+                        hint = " (set OPENROUTER_API_KEY in your environment)"
+                    raise ModelError(f"{backend_name} {r.status_code}{hint}")
                 for line in r.iter_lines():
                     yield line
 

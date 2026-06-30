@@ -47,7 +47,7 @@ class AgentMode(str, Enum):
 
     def filter_tools(self, catalogue: dict[str, Tool]) -> dict[str, Tool]:
         """Return the subset of `catalogue` visible in this mode."""
-        if self == AgentMode.BUILD:
+        if self in (AgentMode.BUILD, AgentMode.AUTO):
             return dict(catalogue)
         # PLAN mode: only safe tools
         return {k: v for k, v in catalogue.items() if v.tier == Tier.SAFE}
