@@ -207,7 +207,7 @@ def _main() -> None:
         _emit({"kind": "status", "text": f"turns={stats.turns}  cost=${stats.total_cost_usd:.4f}  tokens={stats.total_input_tokens}->{stats.total_output_tokens}"})
 
     def _cmd_help() -> None:
-        _emit({"kind": "status", "text": "/exit  /context  /reset  /cost  /model [id]  /sessions  /project [id|new <id>]  /connect  /help"})
+        _emit({"kind": "status", "text": "/exit  /context  /reset  /cost  /model [id]  /sessions  /project [id|new <id>]  /connect [--file <path>]  /help"})
 
     def _cmd_sessions() -> None:
         rows = hub.list_sessions(project_id=config.project_id, limit=20)
@@ -302,6 +302,28 @@ def _main() -> None:
             ("OpenCode Zen", "OPENCODE_API_KEY", "https://opencode.ai/auth (free tier)"),
             ("OpenCode Go", "OPENCODE_API_KEY", "https://opencode.ai/auth (subscription)"),
         ]
+
+        # Read key from file: /connect [number] --file <path>
+        if args and '--file' in args:
+            file_idx = args.index('--file')
+            if file_idx + 1 < len(args):
+                filepath = args[file_idx + 1]
+                provider_idx = 2  # default: OpenCode Go
+                if file_idx >= 1 and args[0].isdigit():
+                    provider_idx = int(args[0]) - 1
+                if 0 <= provider_idx < len(providers):
+                    try:
+                        key = Path(filepath).expanduser().read_text().strip()
+                        if key:
+                            _save_connect_key(providers[provider_idx], key)
+                            return
+                    except OSError as e:
+                        _emit({"kind": "error", "text": f"read failed: {e}"})
+                        return
+                _emit({"kind": "error", "text": "no key found in file"})
+                return
+            _emit({"kind": "error", "text": "usage: /connect [number] --file <path>"})
+            return
 
         # Non-interactive: /connect <number> <key>
         if args and len(args) >= 2 and args[0].isdigit():

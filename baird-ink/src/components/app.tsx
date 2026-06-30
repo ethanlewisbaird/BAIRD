@@ -171,8 +171,8 @@ function readLineCooked(): Promise<string> {
         setInputValue((v) => v.slice(0, -1));
         return;
       }
-      // Accept any character (Ctrl+V, paste, regular typing)
-      if (_input.length === 1 && !key.meta) {
+      // Accept any character (Ctrl+V, paste chunks, regular typing)
+      if (_input && !key.meta) {
         setInputValue((v) => v + _input);
         return;
       }
@@ -227,7 +227,7 @@ function readLineCooked(): Promise<string> {
     }
     if (key.escape) return;
 
-    if (_input.length === 1 && !key.ctrl && !key.meta) {
+    if (_input && !key.meta) {
       setInputValue((v) => v + _input);
     }
   });
