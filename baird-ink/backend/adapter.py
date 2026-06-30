@@ -335,4 +335,11 @@ def _main() -> None:
 
 
 if __name__ == "__main__":
-    _main()
+    try:
+        _main()
+    except Exception as e:
+        import traceback
+        sys.stderr.write(traceback.format_exc())
+        sys.stdout.write(json.dumps({"kind": "error", "text": str(e)}) + "\n")
+        sys.stdout.flush()
+        sys.exit(1)

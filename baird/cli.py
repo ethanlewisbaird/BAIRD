@@ -98,6 +98,16 @@ def _run_ink_tui(config) -> None:  # noqa: ANN001
         console.print(f"[red]baird-ink frontend not found at {ink_dir}[/red]")
         raise typer.Exit(1)
 
+    # Auto-install node dependencies if missing (gitignored)
+    if not (ink_dir / "node_modules" / "ink" / "package.json").exists():
+        console.print("[cyan]installing baird-ink dependencies… (one-time)[/cyan]")
+        try:
+            subprocess.run(["npm", "install"], cwd=str(ink_dir), check=True, capture_output=True)
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            console.print(f"[red]npm install failed: {e}[/red]")
+            console.print("[yellow]run 'cd baird-ink && npm install' manually[/yellow]")
+            raise typer.Exit(1)
+
     # Resolve the correct Python command (venv-aware)
     python_cmd = os.environ.get("BAIRD_PYTHON_CMD") or sys.executable
     if "uv" not in python_cmd:

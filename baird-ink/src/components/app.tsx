@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Box, useInput } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import { Header } from './header.js';
 import { MessageViewport } from './message-viewport.js';
 import { Message } from './message.js';
@@ -8,11 +8,12 @@ import { InputBar } from './input-bar.js';
 import { Dialog } from './dialog.js';
 import { useSessionStore, useUIStore } from '../store/index.js';
 import { startBackend, type BackendAdapter } from '../adapter/backend.js';
-import { SPINNER_INTERVAL } from '../theme.js';
+import { SPINNER_INTERVAL, colors } from '../theme.js';
 import type { BackendEvent } from '../types/events.js';
 
 export function App() {
   const messages = useSessionStore((s) => s.messages);
+  const lastError = useSessionStore((s) => s.lastError);
   const dialog = useUIStore((s) => s.dialog);
 
   const [inputValue, setInputValue] = useState('');
@@ -37,7 +38,12 @@ export function App() {
       useSessionStore.getState().dispatchEvent(event);
     };
     const onExit = (_code: number | null) => {
-      process.exit(0);
+      useSessionStore.getState().dispatchEvent({
+        kind: 'error',
+        text: _code === 0
+          ? 'session ended'
+          : `backend exited (code ${_code})`,
+      } as any);
     };
     const adapter = startBackend(
       'baird-ink/backend/adapter.py',
@@ -147,6 +153,9 @@ export function App() {
         {messages.map((msg) => (
           <Message key={msg.id} msg={msg} />
         ))}
+        {lastError ? (
+          <Text color={colors.error}>error: {lastError}</Text>
+        ) : null}
       </MessageViewport>
       <StatusBar />
       <InputBar value={inputRef.current} />
