@@ -451,12 +451,15 @@ def cmd_project_locations(parts: list[str], ctx: SlashContext) -> SlashResult:
     known = dict(kv)
     if pos:
         known.setdefault("project_id", pos[0])
+    if "project_id" not in known:
+        return SlashResult(
+            handled=True, ok=False,
+            output="usage: /project locations <project_id> [--flag=value]",
+        )
     guard = _reject_flaglike_values(known)
     if guard:
         return SlashResult(handled=True, ok=False, output=guard)
-    fields = [FormField("project_id", "project id", required=True)]
-    vals = collect_form_values(fields, known, input_fn=ctx.input_fn, console=ctx.console)
-    rows = ctx.hub.list_project_locations(vals["project_id"])
+    rows = ctx.hub.list_project_locations(known["project_id"])
     if not rows:
         return SlashResult(handled=True, output="(no locations)")
     body = "\n".join(
