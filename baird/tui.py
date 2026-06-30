@@ -441,6 +441,7 @@ def run_tui_repl(
         with RichLive(
             render_from_state(state),
             screen=_use_pt,
+            auto_refresh=False,       # don't auto-refresh — avoids overwriting prompt_toolkit input
             refresh_per_second=4,
         ) as lv:
             live = lv
