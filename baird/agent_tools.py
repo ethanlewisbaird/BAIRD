@@ -162,6 +162,11 @@ def build_default_catalogue() -> dict[str, Tool]:
                 "properties": {
                     "id": _str_field("Stable slug."),
                     "name": _str_field("Human-readable name (defaults to id)."),
+                    "parent_id": _str_field(
+                        "Optional parent project id for family trees. "
+                        "Register the parent first, then pass its id here "
+                        "for children."
+                    ),
                 },
                 "required": ["id"],
             },
@@ -400,8 +405,10 @@ def _apply_diff_remote(
 # ---- Project management -----------------------------------------------
 
 
-def _register_project(env: ToolEnv, *, id: str, name: str | None = None) -> dict:
-    return env.hub.upsert_project(id=id, name=name or id)
+def _register_project(
+    env: ToolEnv, *, id: str, name: str | None = None, parent_id: str | None = None
+) -> dict:
+    return env.hub.upsert_project(id=id, name=name or id, parent_id=parent_id)
 
 
 def _add_project_location(

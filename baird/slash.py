@@ -738,8 +738,16 @@ _AUDIT_PROMPT_TEMPLATE = (
     "Be conservative — if you're not confident two sibling dirs are part of "
     "one umbrella, list them as separate flat projects. Don't invent umbrellas "
     "just to group things.\n\n"
-    "Do NOT register anything yet — this is a proposal pass. I'll review and "
-    "tell you which to create."
+    "After you produce the structured proposal, ASK the user: "
+    "\"Shall I register these now?\" If they say yes, or give any "
+    "affirmative instruction (\"do it\", \"go ahead\", \"register them\", "
+    "\"fix the model\", etc.), proceed to call `register_project` for "
+    "each project and `add_project_location` for each location. Use the "
+    "role from your proposal (`code` / `data` / `compute` / `mixed`) as the "
+    "`role` argument to `add_project_location`. For family trees, first "
+    "register the parent, then register each child with `parent_id` set "
+    "to the parent's id (the hub enforces parent/child; parent must exist "
+    "first)."
 )
 
 

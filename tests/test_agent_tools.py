@@ -162,7 +162,7 @@ def test_register_project_calls_hub(fake_env) -> None:
     env, hub, _exec = fake_env
     cat = build_catalogue()
     dispatch(cat["register_project"], {"id": "scrna"}, env)
-    hub.upsert_project.assert_called_once_with(id="scrna", name="scrna")
+    hub.upsert_project.assert_called_once_with(id="scrna", name="scrna", parent_id=None)
 
 
 def test_add_location_calls_hub(fake_env) -> None:
