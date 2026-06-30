@@ -102,17 +102,39 @@ export function App() {
     // ── Dialog mode ──
     if (dialog) {
       if (key.escape) { useUIStore.getState().setDialog(null); return; }
-      if (_input >= '1' && _input <= '9') {
-        const idx = parseInt(_input, 10) - 1;
-        if (idx < dialog.choices.length) {
+      // Choices-based dialog (provider selection, confirmations)
+      if (dialog.choices.length > 0) {
+        if (_input >= '1' && _input <= '9') {
+          const idx = parseInt(_input, 10) - 1;
+          if (idx < dialog.choices.length) {
+            adapterRef.current?.sendDialogChoice(_input);
+            useUIStore.getState().setDialog(null);
+          }
+          return;
+        }
+        if (_input === 'q' || _input === 'y' || _input === 'n') {
           adapterRef.current?.sendDialogChoice(_input);
           useUIStore.getState().setDialog(null);
+          return;
         }
         return;
       }
-      if (_input === 'q' || _input === 'y' || _input === 'n') {
-        adapterRef.current?.sendDialogChoice(_input);
-        useUIStore.getState().setDialog(null);
+      // Text-input dialog (API key entry, etc.)
+      if (key.return) {
+        const text = inputRef.current.trim();
+        if (text) {
+          adapterRef.current?.sendDialogChoice(text);
+          useUIStore.getState().setDialog(null);
+          setInputValue('');
+        }
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setInputValue((v) => v.slice(0, -1));
+        return;
+      }
+      if (_input.length === 1 && !key.ctrl && !key.meta) {
+        setInputValue((v) => v + _input);
         return;
       }
       return;

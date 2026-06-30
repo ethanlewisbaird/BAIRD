@@ -276,7 +276,64 @@ def _main() -> None:
         _emit({"kind": "status", "text": f"switched to project {target_id}  session={session['id'][:8]}"})
 
     def _cmd_connect() -> None:
-        _emit({"kind": "status", "text": "To connect OpenCode Go subscription, set OPENCODE_API_KEY in your environment or run:\n  export OPENCODE_API_KEY=your_key_here\nThen use /model opencode/<model-id> to select a model."})
+        providers = [
+            ("OpenRouter", "OPENROUTER_API_KEY", "https://openrouter.ai/keys"),
+            ("OpenCode Zen", "OPENCODE_API_KEY", "https://opencode.ai/auth"),
+        ]
+        _emit({
+            "kind": "dialog",
+            "id": "connect_provider",
+            "title": "Connect API Provider",
+            "body": "Select a provider:\n" + "\n".join(f"  {i+1}. {label} ({url})" for i, (label, _, url) in enumerate(providers)),
+            "choices": [label for label, _, _ in providers],
+        })
+        try:
+            raw = _input_fn("")
+        except EOFError:
+            return
+        try:
+            idx = int(raw.strip()) - 1
+            if idx < 0 or idx >= len(providers):
+                _emit({"kind": "error", "text": "invalid selection"})
+                return
+        except ValueError:
+            _emit({"kind": "error", "text": "invalid selection"})
+            return
+
+        label, env_var, url = providers[idx]
+        _emit({
+            "kind": "dialog",
+            "id": "connect_key",
+            "title": f"Connect {label}",
+            "body": f"Get your API key from: {url}\nPaste your {label} API key below:",
+            "choices": [],
+        })
+        try:
+            key = _input_fn("")
+        except EOFError:
+            return
+        key = key.strip()
+        if not key:
+            _emit({"kind": "error", "text": "no key provided — cancelled"})
+            return
+
+        # Save to secrets.env
+        from baird.paths import secrets_env_path
+        env_path = secrets_env_path()
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict[str, str] = {}
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    existing[k.strip()] = v.strip()
+        existing[env_var] = key
+        env_path.write_text("\n".join(f"{k}={v}" for k, v in sorted(existing.items())) + "\n")
+        env_path.chmod(0o600)
+        os.environ[env_var] = key
+
+        _emit({"kind": "status", "text": f"connected to {label} — key saved"})
 
     # ── Main loop ──
     diff_loop_active = True

@@ -33,7 +33,8 @@ function matching(cmds: typeof COMMANDS, partial: string): typeof COMMANDS {
  */
 export function InputBar({ value }: Props) {
   const dialog = useUIStore((s) => s.dialog);
-  const display = value || 'Type a message…';
+  const isTextDialog = Boolean(dialog && 'choices' in dialog && dialog.choices && dialog.choices.length === 0);
+  const display = value || (isTextDialog ? 'type here and press Enter' : 'Type a message…');
 
   // Slash command suggestions
   const showSuggestions = value.startsWith('/') && value.length > 1;
