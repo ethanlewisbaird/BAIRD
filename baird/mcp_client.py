@@ -213,3 +213,43 @@ def find_server(server_id: str, specs: list[ServerSpec] | None = None) -> Server
         if s.id == server_id:
             return s
     return None
+
+
+# ---------- ToolRegistry integration --------------------------------------
+
+
+def register_server_tools(
+    spec: ServerSpec,
+    tool_registry: Any,
+    *,
+    timeout: float = 15.0,
+) -> list[str]:
+    """Discover tools from an MCP server and register them with a BAIRD
+    `ToolRegistry`. Returns the list of registered tool names."""
+    from .agent_tools import Tier, Tool
+
+    mcp_tools = list_tools(spec, timeout=timeout)
+    registered: list[str] = []
+    for mt in mcp_tools:
+
+        def _make_call(_spec: ServerSpec, _name: str):
+            def _call(env, **kwargs) -> Any:
+                return call_tool(_spec, _name, kwargs)
+            return _call
+
+        tool = Tool(
+            name=f"{spec.id}_{mt.name}",
+            description=mt.description + f" (MCP server: {spec.id})",
+            parameters={
+                "type": "object",
+                "properties": {
+                    k: v for k, v in mt.input_schema.get("properties", {}).items()
+                },
+                "required": mt.input_schema.get("required", []),
+            },
+            tier=Tier.SAFE,
+            fn=_make_call(spec, mt.name),
+        )
+        tool_registry.register(tool)
+        registered.append(tool.name)
+    return registered

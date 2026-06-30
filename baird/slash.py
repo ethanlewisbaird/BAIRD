@@ -45,6 +45,7 @@ class SlashContext:
     input_fn: Callable[[str], str]
     console: object | None = None  # rich Console; optional for tests
     active_host: str | None = None  # see slice E
+    tool_registry: Any = None  # Optional ToolRegistry for /mcp register
 
 
 @dataclass
@@ -1145,6 +1146,38 @@ def cmd_project_delete(parts: list[str], ctx: SlashContext) -> SlashResult:
 # ---- Registry --------------------------------------------------------
 
 
+# ---- MCP commands ------------------------------------------------------
+
+
+def cmd_mcp_connect(args: list[str], ctx: SlashContext) -> SlashResult:
+    """Connect to an MCP server and register its tools dynamically."""
+    if not args:
+        return SlashResult(handled=True, ok=False, output="usage: /mcp connect <server_id>")
+    if ctx.tool_registry is None:
+        return SlashResult(handled=True, ok=False, output="MCP requires a ToolRegistry (not available in this context)")
+    from .mcp_client import find_server, load_servers, register_server_tools
+
+    server_id = args[0]
+    spec = find_server(server_id)
+    if spec is None:
+        return SlashResult(handled=True, ok=False, output=f"MCP server '{server_id}' not found in config")
+    try:
+        names = register_server_tools(spec, ctx.tool_registry)
+    except Exception as e:
+        return SlashResult(handled=True, ok=False, output=f"MCP registration failed: {e}")
+    if not names:
+        return SlashResult(handled=True, ok=False, output=f"MCP server '{server_id}' returned no tools")
+    return SlashResult(
+        handled=True, ok=True,
+        output=f"Registered {len(names)} tool(s) from MCP server '{server_id}': {', '.join(names)}",
+    )
+
+
+def cmd_mcp_disconnect(args: list[str], ctx: SlashContext) -> SlashResult:
+    """Disconnect from MCP server and unregister its tools."""
+    return SlashResult(handled=True, ok=False, output="MCP disconnect not yet implemented")
+
+
 _COMMANDS: dict[str, HandlerFn] = {
     "project new": cmd_project_new,
     "project rename": cmd_project_rename,
@@ -1163,6 +1196,8 @@ _COMMANDS: dict[str, HandlerFn] = {
     "satellite enroll": cmd_satellite_enroll,
     "satellite list": cmd_satellite_list,
     "satellite remove": cmd_satellite_remove,
+    "mcp connect": cmd_mcp_connect,
+    "mcp disconnect": cmd_mcp_disconnect,
 }
 
 

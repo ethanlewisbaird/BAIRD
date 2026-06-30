@@ -39,6 +39,73 @@ from .memory_client import HubClient
 from .model import Completion, ModelError, OpenRouterClient
 
 
+# ---- Git snapshot helpers -----------------------------------------------
+
+
+@dataclass
+class GitSnapshot:
+    """Pre- or post-turn git state."""
+
+    diff: str  # git diff (unstaged)
+    cached: str  # git diff --cached (staged)
+    status: str  # git status --porcelain
+    files: list[str]  # files changed in this turn
+
+
+def _capture_git_snapshot(project_root: Path) -> GitSnapshot | None:
+    """Capture git state at a point in time. Returns None when the directory
+    is not a git repo or git is unavailable."""
+    import subprocess as _sp
+
+    try:
+        diff = _sp.run(
+            ["git", "diff"], cwd=str(project_root),
+            capture_output=True, text=True, timeout=5,
+        ).stdout or ""
+        cached = _sp.run(
+            ["git", "diff", "--cached"], cwd=str(project_root),
+            capture_output=True, text=True, timeout=5,
+        ).stdout or ""
+        status = _sp.run(
+            ["git", "status", "--porcelain"], cwd=str(project_root),
+            capture_output=True, text=True, timeout=5,
+        ).stdout or ""
+        # Parse changed files from status
+        files = []
+        for line in status.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2:
+                files.append(parts[1])
+        return GitSnapshot(diff=diff, cached=cached, status=status, files=files)
+    except Exception:
+        return None
+
+
+def _diff_snapshots(
+    before: GitSnapshot | None, after: GitSnapshot | None,
+) -> str | None:
+    """Produce a human-readable summary of what changed between two snapshots.
+    Returns None when nothing changed or snapshots aren't available."""
+    if before is None or after is None:
+        return None
+    new_files = set(after.files) - set(before.files)
+    removed_files = set(before.files) - set(after.files)
+    changed_files = set(after.files) & set(before.files)
+    changed = [f for f in changed_files if before.status.find(f) != after.status.find(f)]
+
+    parts: list[str] = []
+    if new_files:
+        parts.append(f"new: {', '.join(sorted(new_files))}")
+    if removed_files:
+        parts.append(f"removed: {', '.join(sorted(removed_files))}")
+    if after.diff:
+        parts.append(f"diff:\n{after.diff[:2000]}")
+
+    if not parts:
+        return None
+    return "\n".join(parts)
+
+
 _DIFF_BLOCK_RE = re.compile(r"```(?:diff|patch)\s*\n(.*?)```", re.DOTALL)
 
 
@@ -285,6 +352,7 @@ def run_repl(
                 input_fn=input_fn if iterator is None else _iter_input_fn(iterator),
                 console=console,
                 active_host=getattr(config, "_active_host", None),
+                tool_registry=tool_registry,
             )
             slash_res = _try_slash(line[1:], slash_ctx)
             if slash_res is not None:
@@ -593,6 +661,9 @@ def _one_turn(
 
     Tool calls from the same round are dispatched concurrently via
     `ThreadPoolExecutor` since they are independent.
+
+    Git snapshots are captured before and after the turn; the delta is
+    included in the tool event stream when `on_tool_event` is provided.
     """
     from .agent_tools import (
         AgentMode,
@@ -611,6 +682,9 @@ def _one_turn(
     # the model so it can adapt. The user opts into destructive ops via the
     # corresponding slash commands.
     gate = ApprovalGate()
+
+    # Capture pre-turn git snapshot for diffing after the turn.
+    pre_snapshot = _capture_git_snapshot(config.project_root) if config.project_root else None
 
     with hub.start_action(
         project_id=config.project_id,
@@ -767,6 +841,12 @@ def _one_turn(
                     content=result_str,
                     tool_call_id=tc["id"],
                 )
+
+        # Capture post-turn git snapshot and report file changes.
+        post_snapshot = _capture_git_snapshot(config.project_root) if config.project_root else None
+        file_delta = _diff_snapshots(pre_snapshot, post_snapshot)
+        if file_delta and on_tool_event:
+            on_tool_event("files", file_delta)
 
         # Final completion exists; record aggregated usage.
         assert completion is not None

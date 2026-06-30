@@ -262,6 +262,7 @@ def run_tui_repl(
                     input_fn=_maybe_input,
                     console=console,
                     active_host=getattr(config, "_active_host", None),
+                    tool_registry=tool_registry,
                 )
                 slash_res = _try_slash(line[1:], slash_ctx)
                 if slash_res is not None:

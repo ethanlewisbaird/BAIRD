@@ -1484,5 +1484,45 @@ def satellite_remove(
     console.print(f"[green]removed[/green] {host_id}")
 
 
+# ---- Debug commands -----------------------------------------------------
+
+
+@app.command()
+def debug_session(
+    session_id: str = typer.Argument(..., help="Session UUID to inspect"),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max messages to show"),
+) -> None:
+    """Replay a session's message history — shows every persisted turn
+    including system prompts, user messages, assistant tool_calls, and
+    tool results. Useful for debugging what the model actually saw."""
+    from .memory_client import HubClient
+
+    with _hub_client_from_host() as hub:
+        msgs = hub.get_messages(session_id, limit=limit)
+    if not msgs:
+        console.print(f"[yellow]no messages found for session {session_id[:8]}[/yellow]")
+        return
+    from rich.table import Table
+    from rich.text import Text
+
+    console.print(f"[cyan]Session {session_id} — {len(msgs)} message(s)[/cyan]")
+    for i, m in enumerate(msgs):
+        role = m.get("role", "?")
+        content = (m.get("content") or "")[:300]
+        tool_calls = m.get("tool_calls")
+        tool_call_id = m.get("tool_call_id", "")
+        style = {
+            "user": "green", "assistant": "blue", "tool": "yellow", "system": "dim",
+        }.get(role, "white")
+        label = f"[{i}] {role}"
+        if tool_call_id:
+            label += f" ↦ {tool_call_id[:12]}"
+        if tool_calls:
+            names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
+            content = f"tool_calls: {', '.join(names)} | args: ..."
+        console.print(Text(f"{label}", style=style))
+        console.print(Text(f"  {content[:200]}", style=style))
+
+
 if __name__ == "__main__":
     app()
