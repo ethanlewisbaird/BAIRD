@@ -1549,6 +1549,167 @@ def satellite_restart_daemon(
     console.print(f"[dim]log: ssh {ssh_host} 'tail -20 /tmp/baird-daemon.log'[/dim]")
 
 
+@satellite_app.command("doctor")
+def satellite_doctor(
+    host_id: str = typer.Argument(..., help="host_id from `baird satellite list`"),
+    port: int = typer.Option(8765, "--port", "-p", help="Default executor port on the satellite"),
+) -> None:
+    """Diagnose and fix a satellite: checks SSH, tunnel, daemon, port
+    alignment, and round-trip connectivity.
+
+    Each check shows ✅ (pass) / ❌ (fail) / 🔧 (fixed). Fixes are applied
+    automatically so the satellite reaches a healthy state.
+    """
+    import subprocess as sp
+    import time
+
+    from .satellite import (
+        TunnelSpec,
+        install_tunnel,
+        load_registry,
+        tunnel_status,
+    )
+
+    checks: list[dict] = []
+
+    def ok(msg: str) -> None:
+        checks.append({"status": "ok", "msg": msg})
+
+    def fail(msg: str) -> None:
+        checks.append({"status": "fail", "msg": msg})
+
+    def fix(msg: str) -> None:
+        checks.append({"status": "fix", "msg": msg})
+
+    def _ssh(cmd: str, *, timeout: float = 10) -> sp.CompletedProcess:
+        return sp.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", ssh_host, cmd],
+            capture_output=True, text=True, timeout=timeout,
+        )
+
+    # ---- 1. Registry ----
+    reg = load_registry()
+    entry = reg.get(host_id)
+    if not entry:
+        console.print(f"[red]❌ host_id {host_id!r} not in satellite registry[/red]")
+        raise typer.Exit(1)
+    ssh_host = entry["ssh_host"]
+    fwd_port = entry.get("local_fwd_port", 8766)
+    remote_dir = entry.get("remote_baird_dir", "$HOME/code/BAIRD")
+    token = entry.get("executor_auth_token", "")
+    ok(f"registry: {host_id} → ssh {ssh_host}, fwd port {fwd_port}")
+
+    # ---- 2. SSH ----
+    r = _ssh("echo pong", timeout=8)
+    if r.returncode != 0:
+        fail(f"SSH to {ssh_host}: {r.stderr.strip() or 'no route'}")
+        console.print("[red]✗ SSH is down — cannot proceed[/red]")
+        raise typer.Exit(1)
+    ok(f"SSH to {ssh_host}")
+
+    # ---- 3. Tunnel unit + env file ----
+    tspec = TunnelSpec(ssh_host=ssh_host, local_fwd_port=fwd_port, satellite_port=port)
+    env_file = tspec.baird_config_dir / f"tunnel-{ssh_host}.env"
+    unit_file = tspec.systemd_user_dir / "baird-tunnel@.service"
+    missing = []
+    if not unit_file.exists():
+        missing.append("unit file")
+    if not env_file.exists():
+        missing.append("env file")
+    if missing:
+        fix(f"tunnel files missing: {', '.join(missing)} — installing")
+        install_tunnel(tspec)
+        time.sleep(1)
+    else:
+        ok("tunnel unit + env file present")
+
+    # ---- 4. Tunnel active ----
+    status = tunnel_status(ssh_host)
+    if status != "active":
+        fix(f"tunnel is {status} — restarting")
+        _tunnel_cmd("restart", ssh_host)
+        time.sleep(2)
+        status2 = tunnel_status(ssh_host)
+        if status2 != "active":
+            fail(f"tunnel still {status2} after restart")
+        else:
+            ok("tunnel active")
+    else:
+        ok("tunnel active")
+
+    # ---- 5. Daemon running on satellite ----
+    r = _ssh(f"ss -tlnp 'sport = :{port}'", timeout=10)
+    daemon_on_port = bool(r.stdout.strip())
+    if not daemon_on_port:
+        fix(f"daemon not listening on port {port} — starting")
+        start_script = (
+            f"cd {remote_dir} && "
+            "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
+            "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
+            "</dev/null >/tmp/baird-daemon.log 2>&1 & "
+            "disown; echo started=$?"
+        )
+        try:
+            r2 = _ssh(start_script, timeout=15)
+            if r2.returncode != 0:
+                fail(f"daemon start failed: {r2.stderr.strip() or r2.stdout.strip()}")
+            else:
+                time.sleep(3)
+                r3 = _ssh(f"ss -tlnp 'sport = :{port}'", timeout=10)
+                if r3.stdout.strip():
+                    ok("daemon listening on port 8765")
+                else:
+                    actual = _ssh(
+                        "ss -tlnp 'sport >= :8765 and sport <= :8775'", timeout=10
+                    )
+                    lines = [l for l in actual.stdout.splitlines() if "LISTEN" in l]
+                    if lines:
+                        for ln in lines[:3]:
+                            console.print(f"  [dim]listening: {ln.strip()}[/dim]")
+                        fix("daemon running on alternate port — see above")
+                    else:
+                        fail("daemon failed to start")
+        except sp.TimeoutExpired:
+            fail("start command timed out")
+    else:
+        ok("daemon listening")
+
+    # ---- 6. Round-trip health check ----
+    if fwd_port and token:
+        try:
+            from .executor_client import ExecutorClient
+
+            with ExecutorClient(f"http://127.0.0.1:{fwd_port}", token, timeout=5) as ec:
+                h = ec.health()
+            ok(f"executor health: {h}")
+        except Exception as e:
+            fail(f"executor health check: {e}")
+    else:
+        fail("cannot check health — missing fwd_port or token")
+
+    # ---- Summary ----
+    console.print()
+    for c in checks:
+        icon = {"ok": "✅", "fail": "❌", "fix": "🔧"}.get(c["status"], "?")
+        console.print(f"  {icon} {c['msg']}")
+    has_error = any(c["status"] == "fail" for c in checks)
+    if has_error:
+        console.print(f"\n[yellow]⚠  some checks failed — unresolved issues remain[/yellow]")
+        console.print(f"[dim]hint: ssh {ssh_host} 'tail -30 /tmp/baird-daemon.log'[/dim]")
+        raise typer.Exit(1)
+    else:
+        console.print(f"\n[bold green]✅ {host_id} is healthy[/bold green]")
+
+
+def _tunnel_cmd(action: str, ssh_host: str | None = None) -> None:
+    """Helper: systemctl --user <action> baird-tunnel@<host>."""
+    import subprocess as sp
+    cmd = ["systemctl", "--user", action]
+    if ssh_host:
+        cmd.append(f"baird-tunnel@{ssh_host}")
+    sp.run(cmd, capture_output=True, timeout=30)
+
+
 # ---- Debug commands -----------------------------------------------------
 
 
