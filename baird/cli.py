@@ -1484,6 +1484,71 @@ def satellite_remove(
     console.print(f"[green]removed[/green] {host_id}")
 
 
+@satellite_app.command("restart-daemon")
+def satellite_restart_daemon(
+    host_id: str = typer.Argument(..., help="host_id from `baird satellite list`"),
+    port: int = typer.Option(8765, "--port", "-p", help="Executor port on the satellite"),
+) -> None:
+    """Restart the baird daemon on a satellite via SSH.
+
+    Kills any process listening on the executor port, then starts the daemon
+    in the background with nohup. Works around procps bugs on some HPC hosts
+    (hibu) by using `fuser` instead of `ps`/`pkill`.
+    """
+    import subprocess as _subprocess
+
+    from .satellite import load_registry
+
+    reg = load_registry()
+    entry = reg.get(host_id)
+    if not entry:
+        console.print(f"[yellow]{host_id} not enrolled[/yellow]")
+        raise typer.Exit(1)
+    ssh_host = entry["ssh_host"]
+    remote_dir = entry.get("remote_baird_dir", "$HOME/code/BAIRD")
+
+    console.print(f"[cyan]restarting daemon on {host_id} ({ssh_host})…[/cyan]")
+
+    kill_script = (
+        f"fuser -k {port}/tcp 2>/dev/null; "
+        f"echo kill_exit=$?"
+    )
+    r = _subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", ssh_host, kill_script],
+        capture_output=True, text=True, timeout=15,
+    )
+    if r.returncode != 0:
+        console.print(f"[yellow]kill step had issues: {r.stderr.strip() or r.stdout.strip()}[/yellow]")
+    else:
+        console.print(f"[green]killed old daemon on port {port}[/green]")
+
+    import time
+    time.sleep(1)
+
+    start_script = (
+        f"cd {remote_dir} && "
+        "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
+        "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
+        "</dev/null >/tmp/baird-daemon.log 2>&1 & "
+        "disown; echo daemon_started=$?"
+    )
+    try:
+        r2 = _subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", ssh_host, start_script],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r2.returncode != 0:
+            console.print(f"[red]start step failed[/red]\n{r2.stderr.strip() or r2.stdout.strip()}")
+            raise typer.Exit(1)
+        console.print(f"[green]daemon started on {host_id}[/green]")
+    except _subprocess.TimeoutExpired:
+        console.print("[yellow]start command timed out (daemon may still be booting)[/yellow]")
+
+    time.sleep(3)
+    console.print(f"[dim]check: systemctl --user status baird-tunnel@{ssh_host}[/dim]")
+    console.print(f"[dim]log: ssh {ssh_host} 'tail -20 /tmp/baird-daemon.log'[/dim]")
+
+
 # ---- Debug commands -----------------------------------------------------
 
 
