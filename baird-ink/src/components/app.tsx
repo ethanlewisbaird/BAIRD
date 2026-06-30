@@ -110,6 +110,7 @@ export function App() {
         return;
       }
       // Text-input dialog (Escape ignored — bracketed paste conflict)
+      if (key.ctrl && _input === 'c') { process.exit(0); return; }
       if (key.return) {
         const text = inputRef.current.trim();
         if (text) {
@@ -123,8 +124,8 @@ export function App() {
         setInputValue((v) => v.slice(0, -1));
         return;
       }
-      // Accept any printable character (including during paste)
-      if (_input.length === 1 && !key.ctrl && !key.meta) {
+      // Accept any character (Ctrl+V, paste, regular typing)
+      if (_input.length === 1 && !key.meta) {
         setInputValue((v) => v + _input);
         return;
       }
