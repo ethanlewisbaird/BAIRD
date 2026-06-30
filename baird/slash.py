@@ -1168,7 +1168,8 @@ def cmd_project_delete(parts: list[str], ctx: SlashContext) -> SlashResult:
 _PROVIDERS: list[tuple[str, str, str]] = [
     # (label, env_var, description)
     ("OpenRouter",     "OPENROUTER_API_KEY", "https://openrouter.ai/keys"),
-    ("OpenCode Go",    "OPENCODE_API_KEY",   "https://opencode.ai/auth"),
+    ("OpenCode Zen",   "OPENCODE_API_KEY",   "https://opencode.ai/auth (free tier)"),
+    ("OpenCode Go",    "OPENCODE_API_KEY",   "https://opencode.ai/auth (subscription)"),
 ]
 
 
