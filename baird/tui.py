@@ -441,7 +441,7 @@ def run_tui_repl(
         with RichLive(
             render_from_state(state),
             screen=_use_pt,
-            refresh_per_second=8,
+            refresh_per_second=4,
         ) as lv:
             live = lv
             _render()
@@ -452,7 +452,7 @@ def run_tui_repl(
                     _render()
                     try:
                         if _use_pt:
-                            dlg_key = _maybe_input("")
+                            dlg_key = _maybe_input(f"{BAR}  ")
                         else:
                             dlg_key = _maybe_input("▸ ")
                     except (EOFError, KeyboardInterrupt):
@@ -476,7 +476,7 @@ def run_tui_repl(
                 _render()
                 try:
                     if _use_pt:
-                        raw = _maybe_input("")
+                        raw = _maybe_input(f"{BAR}  ")
                     else:
                         raw = _maybe_input("▸ ")
                 except (EOFError, KeyboardInterrupt):
@@ -719,6 +719,7 @@ def run_tui_repl(
                 seen_tool_names: set[str] = set()
 
                 def _on_chunk(delta: str) -> None:
+                    state.spinner_frame += 1
                     if delta.startswith('{"tool_calls":'):
                         try:
                             tc_list = json.loads(delta).get("tool_calls", [])
@@ -736,9 +737,8 @@ def run_tui_repl(
                             pass
                     else:
                         state.append_text(delta)
-                        # Throttle re-render to every ~8 chunks for performance
-                        if len(state.pending_text) % 80 < 8:
-                            _render()
+                        # Re-render on every chunk for responsive typing feedback
+                        _render()
 
                 def _extract_tool_name(detail: str, event: str) -> str:
                     if event == "call":

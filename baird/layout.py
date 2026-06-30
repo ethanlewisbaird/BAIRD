@@ -344,8 +344,8 @@ def render_messages_area(state: UIState) -> Text:
     # ── Viewport clipping (C1) ──
     lines = full.plain.splitlines()
     total_lines = len(lines)
-    # Available height: terminal minus header(1) minus bottom(3: prompt+status+border)
-    avail = max(5, state.terminal_height - 5)
+    # Available height: terminal minus header(1) minus status(1) minus border(1)
+    avail = max(5, state.terminal_height - 3)
     scroll = state.scroll_offset
     # Clamp scroll offset
     max_scroll = max(0, total_lines - avail)
@@ -465,12 +465,8 @@ def render_full_ui(state: UIState) -> Layout:
             name="content",
         )
 
-    # Bottom area: prompt above status
-    bottom = Layout(name="bottom", size=2)
-    bottom.split_column(
-        Layout(render_prompt_area(state), size=1, name="prompt"),
-        Layout(status, size=1, name="status"),
-    )
+    # Bottom area: just the status bar (prompt is handled by prompt_toolkit)
+    bottom = Layout(status, size=1, name="status")
 
     # Main layout
     layout = Layout()
