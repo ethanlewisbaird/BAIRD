@@ -31,8 +31,8 @@ export const useUIStore = create<UIStore>((set) => ({
   dialog: null,
   spinnerFrame: 0,
 
-  scrollUp: () => set((s) => ({ scrollOffset: Math.min(s.scrollOffset + 4, 999) })),
-  scrollDown: () => set((s) => ({ scrollOffset: Math.max(0, s.scrollOffset - 4) })),
+  scrollUp: () => set((s) => ({ scrollOffset: Math.min(s.scrollOffset + 1, 50) })),
+  scrollDown: () => set((s) => ({ scrollOffset: Math.max(0, s.scrollOffset - 1) })),
   scrollToBottom: () => set({ scrollOffset: 0 }),
   toggleSidebar: () => set((s) => ({ sidebarVisible: !s.sidebarVisible })),
   toggleTimestamps: () => set((s) => ({ showTimestamps: !s.showTimestamps })),

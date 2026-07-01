@@ -2,7 +2,6 @@ import { useState, useRef, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { Header } from './header.js';
 import { MessageViewport } from './message-viewport.js';
-import { Message } from './message.js';
 import { StatusBar } from './status-bar.js';
 import { InputBar, COMMANDS, matching } from './input-bar.js';
 import { Dialog } from './dialog.js';
@@ -12,7 +11,6 @@ import { SPINNER_INTERVAL, colors } from '../theme.js';
 import type { BackendEvent } from '../types/events.js';
 
 export function App() {
-  const messages = useSessionStore((s) => s.messages);
   const lastError = useSessionStore((s) => s.lastError);
   const dialog = useUIStore((s) => s.dialog);
 
@@ -272,14 +270,10 @@ function readLineCooked(): Promise<string> {
   return (
     <Box flexDirection="column" height="100%">
       <Header />
-      <MessageViewport>
-        {messages.map((msg) => (
-          <Message key={msg.id} msg={msg} />
-        ))}
-        {lastError ? (
-          <Text color={colors.error}>error: {lastError}</Text>
-        ) : null}
-      </MessageViewport>
+      {lastError ? (
+        <Text color={colors.error}>error: {lastError}</Text>
+      ) : null}
+      <MessageViewport />
       <StatusBar />
       <InputBar value={inputRef.current} suggestions={suggestions.slice(0, 10)} selectedIndex={clampedSelected} />
       {dialog ? <Dialog /> : null}
