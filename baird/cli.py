@@ -1938,7 +1938,11 @@ def doctor(
 
                 # 5. Token
                 if not token:
-                    fail("missing executor auth token — re-enroll: baird satellite enroll --host-id GPU-wrkstn <ssh-host>", sections)
+                    fail(
+                        f"missing executor auth token — run: "
+                        f"baird satellite enroll {ssh_host} --host-id {host_id}",
+                        sections,
+                    )
 
                 # 6. Round-trip
                 if fwd_port and token:
