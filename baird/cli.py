@@ -1829,11 +1829,12 @@ def doctor(
 
     # ── Satellite checks ──
     if check_satellites:
-        from .satellite import load_registry
+        from .satellite import load_registry, save_registry
         reg = load_registry()
         if not reg:
             console.print("\n[yellow]  no satellites enrolled — skipping[/yellow]")
         else:
+            import re as _rc
             for host_id, entry in sorted(reg.items()):
                 console.print(f"\n[bold]🛰  {host_id}[/bold]")
                 sections = f"satellite:{host_id}"
@@ -1842,34 +1843,30 @@ def doctor(
                 remote_dir = entry.get("remote_baird_dir", "$HOME/code/BAIRD")
                 token = entry.get("executor_auth_token", "")
 
-                # SSH
                 def _ssh(cmd: str, timeout: float = 10) -> sp.CompletedProcess:
                     return sp.run(
                         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", ssh_host, cmd],
                         capture_output=True, text=True, timeout=timeout,
                     )
 
+                # 1. SSH
                 r = _ssh("echo pong", timeout=8)
                 if r.returncode != 0:
                     fail(f"SSH to {ssh_host}: {r.stderr.strip() or 'no route'}", sections)
                     continue
                 ok(f"SSH to {ssh_host}", sections)
 
-                # Daemon listening
-                r = _ssh("ss -tlnp 2>/dev/null | grep ':8765'", timeout=10)
+                # 2. Daemon + port detection
+                DAEMON_PORT = 8765
+                r = _ssh(f"ss -tlnp 2>/dev/null | grep ':{DAEMON_PORT}'", timeout=10)
                 if r.stdout.strip():
-                    ok("daemon listening on :8765", sections)
+                    actual_port = DAEMON_PORT
                 else:
-                    r2 = _ssh("ss -tlnp 2>/dev/null | grep -E ':(87[0-9]{2})'", timeout=10)
-                    if r2.stdout.strip():
-                        lines = [l.strip() for l in r2.stdout.splitlines() if "LISTEN" in l]
-                        ports = []
-                        for ln in lines[:3]:
-                            import re
-                            m = re.search(r":(\d+)", ln)
-                            if m:
-                                ports.append(m.group(1))
-                        fail(f"daemon on wrong port(s): {','.join(ports)} (expected 8765)", sections)
+                    r2 = _ssh("ss -tlnp 2>/dev/null | grep -oP ':(87\\d{2})' | sort -u", timeout=10)
+                    ports = [p[1:] for p in r2.stdout.strip().splitlines() if p.startswith(":")]
+                    if ports:
+                        actual_port = int(ports[0])
+                        fxd(f"daemon on port {actual_port} → updating registry", sections)
                     else:
                         if fix:
                             fxd("daemon not running — starting", sections)
@@ -1882,35 +1879,100 @@ def doctor(
                             try:
                                 _ssh(start_script, timeout=15)
                                 time.sleep(3)
-                                r3 = _ssh("ss -tlnp 2>/dev/null | grep ':8765'", timeout=10)
+                                r3 = _ssh(f"ss -tlnp 2>/dev/null | grep ':{DAEMON_PORT}'", timeout=10)
                                 if r3.stdout.strip():
-                                    ok("daemon started", sections)
+                                    actual_port = DAEMON_PORT
+                                    ok("daemon started on :8765", sections)
                                 else:
-                                    fail("daemon failed to start", sections)
+                                    r4 = _ssh("ss -tlnp 2>/dev/null | grep -oP ':(87\\d{2})' | sort -u", timeout=10)
+                                    alt = [p[1:] for p in r4.stdout.strip().splitlines() if p.startswith(":")]
+                                    if alt:
+                                        actual_port = int(alt[0])
+                                        fxd(f"daemon on alternate port {actual_port}", sections)
+                                    else:
+                                        fail("daemon failed to start", sections)
+                                        continue
                             except sp.TimeoutExpired:
                                 fail("start command timed out", sections)
+                                continue
                         else:
                             fail("daemon not running", sections)
+                            continue
 
-                # Tunnel
-                from .satellite import tunnel_status
+                # 3. Sync registry port
+                if not fwd_port:
+                    fwd_port = actual_port
+                    entry["local_fwd_port"] = actual_port
+                    fxd(f"registry port set to {actual_port}", sections)
+                elif fwd_port != actual_port:
+                    if fix:
+                        entry["local_fwd_port"] = actual_port
+                        save_registry(reg)
+                        fxd(f"port mismatch {fwd_port}→{actual_port} — updated registry", sections)
+                        fwd_port = actual_port
+                    else:
+                        fail(f"port mismatch: registry={fwd_port} daemon={actual_port}", sections)
+                else:
+                    ok(f"daemon on :{actual_port} matches registry", sections)
+
+                # 4. Tunnel
+                from .satellite import TunnelSpec, install_tunnel, tunnel_status
                 tstatus = tunnel_status(ssh_host)
                 if tstatus == "active":
                     ok("SSH tunnel active", sections)
                 else:
-                    fail(f"SSH tunnel {tstatus}", sections)
+                    if fix:
+                        fxd(f"tunnel {tstatus} — installing", sections)
+                        tspec = TunnelSpec(ssh_host=ssh_host, local_fwd_port=fwd_port, satellite_port=actual_port)
+                        install_tunnel(tspec)
+                        time.sleep(1)
+                        _tunnel_cmd("restart", ssh_host)
+                        time.sleep(2)
+                        tstatus2 = tunnel_status(ssh_host)
+                        if tstatus2 == "active":
+                            ok("tunnel installed and active", sections)
+                        else:
+                            fail(f"tunnel still {tstatus2} after install", sections)
+                    else:
+                        fail(f"SSH tunnel {tstatus}", sections)
 
-                # Round-trip
+                # 5. Token — regenerate if missing
+                if not token:
+                    if fix and fwd_port:
+                        fxd("missing token — re-enrolling", sections)
+                        from .satellite import TunnelSpec, install_tunnel
+                        tspec = TunnelSpec(ssh_host=ssh_host, local_fwd_port=fwd_port, satellite_port=actual_port)
+                        install_tunnel(tspec)
+                        time.sleep(1)
+                        _tunnel_cmd("restart", ssh_host)
+                        time.sleep(2)
+                        env_file = tspec.baird_config_dir / f"tunnel-{ssh_host}.env"
+                        if env_file.exists():
+                            for line in env_file.read_text().splitlines():
+                                if line.startswith("EXECUTOR_TOKEN="):
+                                    token = line.split("=", 1)[1].strip()
+                                    entry["executor_auth_token"] = token
+                                    save_registry(reg)
+                                    ok("token regenerated from tunnel env file", sections)
+                                    break
+                            else:
+                                fail("could not extract token from env file", sections)
+                        else:
+                            fail("tunnel env file not created", sections)
+                    else:
+                        fail("missing executor_auth_token", sections)
+
+                # 6. Round-trip
                 if fwd_port and token:
                     try:
                         from .executor_client import ExecutorClient
                         with ExecutorClient(f"http://127.0.0.1:{fwd_port}", token, timeout=5) as ec:
                             h = ec.health()
-                        ok(f"executor health OK", sections)
+                        ok(f"executor round-trip OK", sections)
                     except Exception as e:
                         fail(f"executor unreachable: {e}", sections)
                 else:
-                    fail("missing fwd_port or token — cannot check", sections)
+                    fail("missing fwd_port or token", sections)
 
     # ── Summary ──
     console.print()
