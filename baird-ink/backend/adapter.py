@@ -146,56 +146,51 @@ def _main() -> None:
     _last_output: str = ""
 
     def _format_output(content: str) -> str | None:
-        """Format tool result for human-readable display.  Returns None to skip."""
+        """Return a one-line summary of tool output, or None to skip."""
         if not content or content.strip() in ("[]", "{}", "ok", "(empty stdout)"):
             return None
-        # Try to parse as JSON
         try:
             obj = json.loads(content)
-            # Command result with stdout/stderr
+            # Command result with stdout
             if isinstance(obj, dict) and "stdout" in obj:
                 out = obj.get("stdout", "") or ""
                 if out:
-                    lines = out.strip().split("\n")[:20]
-                    return "\n".join(lines)
+                    first = out.strip().split("\n")[0][:120]
+                    return first
+                err = obj.get("stderr", "") or ""
+                if err:
+                    return err.strip().split("\n")[0][:120]
                 return None
-            # Project list — flatten to name: id
+            # Project list
             if isinstance(obj, list) and len(obj) > 0 and isinstance(obj[0], dict) and "id" in obj[0]:
-                lines = []
-                for item in obj[:10]:
-                    if "locations" in item:
-                        locs = len(item.get("locations") or [])
-                        lines.append(f"  {item['id']}  {item.get('name','?')}  ({locs} location(s))")
-                    else:
-                        lines.append(f"  {item['id']}  {item.get('name','?')}")
-                if len(obj) > 10:
-                    lines.append(f"  ... and {len(obj) - 10} more")
-                return "\n".join(lines)
-            # Single location entry — one line
-            if isinstance(obj, dict) and "host" in obj and "path" in obj:
-                return f"  {obj.get('host','?')}:{obj.get('path','?')} ({obj.get('role','?')})"
-            # Location list — flatten
+                names = ", ".join(item.get("name", item["id"]) for item in obj[:5])
+                tail = f" (+{len(obj) - 5})" if len(obj) > 5 else ""
+                return f"{len(obj)} project(s): {names}{tail}"
+            # Location list
             if isinstance(obj, list) and len(obj) > 0 and isinstance(obj[0], dict) and "host" in obj[0]:
-                lines = []
-                for item in obj[:10]:
-                    lines.append(f"  {item.get('host','?')}:{item.get('path','?')} ({item.get('role','?')})")
-                if len(obj) > 10:
-                    lines.append(f"  ... and {len(obj) - 10} more")
-                return "\n".join(lines)
-            # Other JSON — compact
-            return json.dumps(obj, indent=2)[:2000]
+                locs = ", ".join(item.get("path", "").split("/")[-1] for item in obj[:5])
+                tail = f" (+{len(obj) - 5})" if len(obj) > 5 else ""
+                return f"{len(obj)} location(s): {locs}{tail}"
+            # Single location
+            if isinstance(obj, dict) and "host" in obj and "path" in obj:
+                return f"{obj.get('host','?')}:{obj.get('path','?')} ({obj.get('role','?')})"
+            # Other dict/list — compact
+            if isinstance(obj, list):
+                return f"[{len(obj)} item(s)]"
+            if isinstance(obj, dict):
+                keys = ", ".join(sorted(obj.keys())[:4])
+                return f"{{{keys}}}"
+            return str(obj)[:120]
         except (json.JSONDecodeError, TypeError):
             pass
-        # Plain text — skip boilerplate error messages
-        if "Client error" in content or "Server error" in content:
-            # Extract just the status + url component
+        # Plain text or error — first line only
+        first_line = content.splitlines()[0][:120]
+        if "Exception" in first_line or "error" in first_line.lower():
             import re as _re
-            m = _re.search(r"(\d{3})\b", content)
-            path = content.split("url '")[1].split("'")[0] if "url '" in content else ""
-            endpoint = path.rsplit("/", 1)[-1] if path else "?"
+            m = _re.search(r"(\d{3})\b", first_line)
             if m:
-                return f"{m.group(1)} Forbidden: {endpoint}"
-        return content[:2000]
+                return f"{m.group(1)}: {first_line[:80]}"
+        return first_line
 
     def _on_tool_event(event: str, detail: str) -> None:
         nonlocal _pending_start_ids, _last_started_id, _last_output
