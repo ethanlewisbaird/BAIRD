@@ -142,6 +142,38 @@ def _main() -> None:
         else:
             _emit({"kind": "text_delta", "delta": delta})
 
+    def _format_output(content: str) -> str:
+        """Format tool result for human-readable display."""
+        if not content:
+            return content
+        # Try to parse as JSON
+        try:
+            obj = json.loads(content)
+            # Command result with stdout/stderr
+            if isinstance(obj, dict) and "stdout" in obj:
+                out = obj.get("stdout", "") or ""
+                if out:
+                    lines = out.strip().split("\n")
+                    return "\n".join(lines[:20])  # first 20 lines
+                return "(empty stdout)"
+            # Project list — flatten to name: id
+            if isinstance(obj, list) and len(obj) > 0 and isinstance(obj[0], dict) and "id" in obj[0]:
+                lines = []
+                for item in obj[:10]:
+                    if "locations" in item:
+                        locs = len(item.get("locations") or [])
+                        lines.append(f"  {item['id']}  {item.get('name','?')}  ({locs} location(s))")
+                    else:
+                        lines.append(f"  {item['id']}  {item.get('name','?')}")
+                if len(obj) > 10:
+                    lines.append(f"  ... and {len(obj) - 10} more")
+                return "\n".join(lines)
+            # Other JSON — pretty print
+            return json.dumps(obj, indent=2)[:2000]
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return content[:2000]
+
     def _on_tool_event(event: str, detail: str) -> None:
         nonlocal _pending_start_ids, _last_started_id
         if event == "call":
@@ -152,12 +184,13 @@ def _main() -> None:
         elif event == "result":
             name = detail.split(":")[0]
             tc_id = _last_started_id.get(name, f"tc_{name}")
+            # Extract content after "name: " — handle multi-line results
             content = detail.strip()
-            if ":" in (content.splitlines()[0] if content else ""):
-                _, _, rest = content.partition(": ")
-                content = rest
+            if content.startswith(name + ":"):
+                content = content[len(name) + 1:].strip()
             _emit({"kind": "tool_completed", "invocationId": tc_id})
-            _emit({"kind": "tool_output", "invocationId": tc_id, "chunk": content[:500]})
+            formatted = _format_output(content)
+            _emit({"kind": "tool_output", "invocationId": tc_id, "chunk": formatted})
         elif event == "blocked":
             _emit({"kind": "error", "text": f"blocked: {detail[:80]}"})
         elif event == "files":
