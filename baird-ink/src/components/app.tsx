@@ -221,8 +221,8 @@ function readLineCooked(): Promise<string> {
         setSelectedSuggestion((i) => (i < suggestions.length - 1 ? i + 1 : 0));
         return;
       }
-      // Tab completes with highlighted suggestion
-      if (key.tab) {
+      // Enter/Tab complete with highlighted suggestion (don't submit)
+      if (key.return || key.tab) {
         const cmd = suggestions[clampedSelected].cmd;
         setInputValue('/' + cmd + ' ');
         setSelectedSuggestion(0);
