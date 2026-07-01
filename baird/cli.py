@@ -940,13 +940,13 @@ def update(
                     for line in lines:
                         console.print(f"  {line}")
                 console.print(f"[cyan]restarting daemon on {host_id}…[/cyan]")
-                uv_bin = "\"$HOME/.local/bin/uv\""
                 restart_script = (
-                    "cd /tmp && "
+                    "pkill -f 'baird.daemon' 2>/dev/null; sleep 2; "
+                    f"cd {remote_dir} && "
                     "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
                     "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
                     "</dev/null >/tmp/baird-daemon.log 2>&1 & "
-                    "disown; echo restart_ok"
+                    "disown; sleep 2; echo restart_ok"
                 )
                 try:
                     r2 = _subprocess.run(
