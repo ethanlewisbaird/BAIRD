@@ -26,6 +26,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 def _main() -> None:
     import time
 
+    # Load secrets.env into environment at startup (so keys persist across sessions)
+    from baird.paths import secrets_env_path as _secrets_env_path
+    _senv = _secrets_env_path()
+    if _senv.exists():
+        for _line in _senv.read_text().splitlines():
+            _line = _line.strip()
+            if _line and "=" in _line and not _line.startswith("#"):
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
+
     from baird.config import load_host_config
     from baird.memory_client import HubClient
     from baird.model import OpenRouterClient, make_hub_proxy_transport

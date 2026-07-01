@@ -160,13 +160,17 @@ function readLineCooked(): Promise<string> {
         }
         return;
       }
-      // Text-input dialog (Escape ignored — bracketed paste conflict)
+      // Text-input dialog
       if (key.ctrl && _input === 'c') { process.exit(0); return; }
       if (key.ctrl && _input === 'p') {
-        useUIStore.getState().setDialog(null);
+        setInputValue('[paste mode — paste and press Enter]');
         readLineCooked().then((pasted) => {
           if (pasted) {
+            setInputValue('');
+            useUIStore.getState().setDialog(null);
             adapterRef.current?.sendDialogChoice(pasted);
+          } else {
+            setInputValue('');
           }
         });
         return;
@@ -174,9 +178,9 @@ function readLineCooked(): Promise<string> {
       if (key.return) {
         const text = inputRef.current.trim();
         if (text) {
+          setInputValue('');
           adapterRef.current?.sendDialogChoice(text);
           useUIStore.getState().setDialog(null);
-          setInputValue('');
         }
         return;
       }
@@ -184,7 +188,6 @@ function readLineCooked(): Promise<string> {
         setInputValue((v) => v.slice(0, -1));
         return;
       }
-      // Accept any character (Ctrl+V, paste chunks, regular typing)
       if (_input && !key.meta) {
         setInputValue((v) => v + _input);
         return;
