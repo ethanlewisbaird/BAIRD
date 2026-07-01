@@ -4,7 +4,7 @@ import { Header } from './header.js';
 import { MessageViewport } from './message-viewport.js';
 import { Message } from './message.js';
 import { StatusBar } from './status-bar.js';
-import { InputBar } from './input-bar.js';
+import { InputBar, COMMANDS, matching } from './input-bar.js';
 import { Dialog } from './dialog.js';
 import { useSessionStore, useUIStore } from '../store/index.js';
 import { startBackend, type BackendAdapter } from '../adapter/backend.js';
@@ -19,6 +19,19 @@ export function App() {
   const [inputValue, setInputValue] = useState('');
   const inputRef = useRef(inputValue);
   inputRef.current = inputValue;
+
+  // Slash command suggestions
+  const showSuggestions = inputValue.startsWith('/') && inputValue.length > 1;
+  const suggestions = showSuggestions ? matching(COMMANDS, inputValue.slice(1)) : [];
+  const [selectedSuggestion, setSelectedSuggestion] = useState(0);
+
+  // Reset selection when suggestion list shrinks below current index
+  useEffect(() => {
+    if (selectedSuggestion >= suggestions.length) {
+      setSelectedSuggestion(Math.max(0, suggestions.length - 1));
+    }
+  }, [suggestions.length]);
+  const clampedSelected = Math.min(selectedSuggestion, Math.max(0, suggestions.length - 1));
 
   const adapterRef = useRef<BackendAdapter | null>(null);
 
@@ -197,10 +210,31 @@ function readLineCooked(): Promise<string> {
     if (key.pageDown) { useUIStore.getState().scrollDown(); return; }
 
     // ── Normal input mode ──
+
+    // Arrow key navigation for suggestion dropdown
+    if (suggestions.length > 0) {
+      if (key.upArrow) {
+        setSelectedSuggestion((i) => (i > 0 ? i - 1 : suggestions.length - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setSelectedSuggestion((i) => (i < suggestions.length - 1 ? i + 1 : 0));
+        return;
+      }
+      // Tab completes with highlighted suggestion
+      if (key.tab) {
+        const cmd = suggestions[clampedSelected].cmd;
+        setInputValue('/' + cmd + ' ');
+        setSelectedSuggestion(0);
+        return;
+      }
+    }
+
     if (key.return) {
       const text = inputRef.current.trim();
       if (!text) return;
       setInputValue('');
+      setSelectedSuggestion(0);
 
       if (text.startsWith('/')) {
         const cmd = text.slice(1).split(' ')[0].toLowerCase();
@@ -244,7 +278,7 @@ function readLineCooked(): Promise<string> {
         ) : null}
       </MessageViewport>
       <StatusBar />
-      <InputBar value={inputRef.current} />
+      <InputBar value={inputRef.current} suggestions={suggestions.slice(0, 10)} selectedIndex={clampedSelected} />
       {dialog ? <Dialog /> : null}
     </Box>
   );
