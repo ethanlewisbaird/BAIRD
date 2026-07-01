@@ -144,13 +144,34 @@ def _main() -> None:
 
     # Track last output to avoid repeating identical tool results
     _last_output: str = ""
+    _tool_result_count: dict[str, int] = {}
 
-    def _format_output(content: str) -> str | None:
+    def _format_output(content: str, tool_name: str = "") -> str | None:
         """Return a one-line summary of tool output, or None to skip."""
+        nonlocal _last_output, _tool_result_count
         if not content or content.strip() in ("[]", "{}", "ok", "(empty stdout)"):
             return None
+        # Limit repetitive results per tool (at most 3 shown)
+        cnt = _tool_result_count.get(tool_name, 0) + 1
+        _tool_result_count[tool_name] = cnt
+        if cnt > 2:
+            return None
+        # Try to parse as JSON — some results have embedded newlines, fix those
+        fixed = content
         try:
-            obj = json.loads(content)
+            json.loads(fixed)
+        except (json.JSONDecodeError, TypeError):
+            # Escape unescaped control chars inside JSON strings
+            in_str = False
+            chars = list(fixed)
+            for i, c in enumerate(chars):
+                if c == '"':
+                    in_str = not in_str
+                elif in_str and c in '\n\r\t':
+                    chars[i] = {'\n': '\\n', '\r': '\\r', '\t': '\\t'}.get(c, c)
+            fixed = ''.join(chars)
+        try:
+            obj = json.loads(fixed)
             # Command result with stdout
             if isinstance(obj, dict) and "stdout" in obj:
                 out = obj.get("stdout", "") or ""
@@ -183,17 +204,12 @@ def _main() -> None:
             return str(obj)[:120]
         except (json.JSONDecodeError, TypeError):
             pass
-        # Plain text or error — first line only
+        # Fallback: first line of raw content
         first_line = content.splitlines()[0][:120]
-        if "Exception" in first_line or "error" in first_line.lower():
-            import re as _re
-            m = _re.search(r"(\d{3})\b", first_line)
-            if m:
-                return f"{m.group(1)}: {first_line[:80]}"
         return first_line
 
     def _on_tool_event(event: str, detail: str) -> None:
-        nonlocal _pending_start_ids, _last_started_id, _last_output
+        nonlocal _pending_start_ids, _last_started_id, _last_output, _tool_result_count
         if event == "call":
             name = detail.split("(")[0]
             tc_id = _pending_start_ids.pop(0) if _pending_start_ids else f"tc_{name}"
@@ -206,7 +222,7 @@ def _main() -> None:
             if content.startswith(name + ":"):
                 content = content[len(name) + 1:].strip()
             _emit({"kind": "tool_completed", "invocationId": tc_id})
-            formatted = _format_output(content)
+            formatted = _format_output(content, name)
             if formatted is not None:
                 # Skip if identical to last output (deduplicate)
                 if formatted == _last_output:
@@ -547,6 +563,7 @@ def _main() -> None:
                         _emit({"kind": "status", "text": brief + "…" if len(line) > 120 else brief})
                         _emit({"kind": "turn_start"})
                         seen_tool_names.clear()
+                        _tool_result_count.clear()
                         try:
                             completion = _one_turn(
                                 user_msg=line, hub=hub, model_client=model_client,
@@ -573,6 +590,7 @@ def _main() -> None:
         _emit({"kind": "user_message", "text": line})
         _emit({"kind": "turn_start"})
         seen_tool_names.clear()
+        _tool_result_count.clear()
 
         try:
             completion = _one_turn(
