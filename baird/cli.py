@@ -955,13 +955,12 @@ def update(
                     f"cd {remote_dir} && "
                     "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
                     "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
-                    "</dev/null >/tmp/baird-daemon.log 2>&1 & "
-                    "disown; sleep 1; echo restart_ok"
+                    "</dev/null >/tmp/baird-daemon.log 2>&1 &"
                 )
                 try:
                     r2 = _subprocess.run(
-                        ["ssh", "-o", "BatchMode=yes", ssh_host, start_script],
-                        capture_output=True, text=True, timeout=15,
+                        ["ssh", "-f", "-o", "BatchMode=yes", ssh_host, start_script],
+                        capture_output=True, text=True, timeout=30,
                     )
                     if r2.returncode != 0 and "restart_ok" not in (r2.stdout or ""):
                         console.print(f"[yellow]{host_id} restart failed ({r2.returncode})[/yellow]")
