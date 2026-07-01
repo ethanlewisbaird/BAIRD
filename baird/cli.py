@@ -939,39 +939,10 @@ def update(
                     lines = [l for l in r.stdout.splitlines() if l.strip()]
                     for line in lines:
                         console.print(f"  {line}")
-                console.print(f"[cyan]restarting daemon on {host_id}…[/cyan]")
-                # Step 1: kill old daemon (separate SSH to avoid connection drop)
-                kill_script = "old=$(pgrep -f 'python.*baird.daemon' || true); [ -n \"$old\" ] && kill $old 2>/dev/null; echo killed=$?"
-                try:
-                    rk = _subprocess.run(
-                        ["ssh", "-o", "BatchMode=yes", ssh_host, kill_script],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                except Exception:
-                    pass  # kill step is best-effort
-                _time.sleep(2)
-                # Step 2: start new daemon
-                start_script = (
-                    f"cd {remote_dir} && "
-                    "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
-                    "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
-                    "</dev/null >/tmp/baird-daemon.log 2>&1 &"
-                )
-                try:
-                    r2 = _subprocess.run(
-                        ["ssh", "-f", "-o", "BatchMode=yes", ssh_host, start_script],
-                        capture_output=True, text=True, timeout=30,
-                    )
-                    if r2.returncode != 0 and "restart_ok" not in (r2.stdout or ""):
-                        console.print(f"[yellow]{host_id} restart failed ({r2.returncode})[/yellow]")
-                        err = (r2.stderr or r2.stdout or "").strip()
-                        if err:
-                            for line in err.splitlines()[-3:]:
-                                console.print(f"  [dim]{line}[/dim]")
-                    else:
-                        console.print(f"[green]{host_id} updated[/green]")
-                except Exception:
-                    console.print(f"[yellow]{host_id} restart skipped (ssh timed out)[/yellow]")
+                    console.print(f"[green]{host_id} code updated[/green]")
+                # Note: daemon restart is now handled separately via:
+                #   baird satellite restart-daemon <host_id>
+                # This avoids SSH timeout issues during complex restart scripts.
 
     # 3. Restart local hub (+ daemon) with new code
     if not sat_only:
