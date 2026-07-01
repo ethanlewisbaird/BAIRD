@@ -487,8 +487,28 @@ def _main() -> None:
                         _emit({"kind": "status", "text": slash_res.output})
                     if slash_res.next_user_prompt:
                         line = slash_res.next_user_prompt
-                        # Fall through to model turn
-                    else:
+                        # Suppress the full prompt — emit a brief status instead
+                        brief = line.strip().splitlines()[0][:120]
+                        _emit({"kind": "status", "text": brief + "…" if len(line) > 120 else brief})
+                        _emit({"kind": "turn_start"})
+                        seen_tool_names.clear()
+                        try:
+                            completion = _one_turn(
+                                user_msg=line, hub=hub, model_client=model_client,
+                                session_id=session["id"], config=config, system=system,
+                                host_id=None, tool_registry=tool_registry,
+                                agent_mode=agent_mode, on_chunk=_on_chunk,
+                                on_tool_event=_on_tool_event,
+                            )
+                        except Exception as e:
+                            _emit({"kind": "error", "text": str(e)})
+                            continue
+                        stats.turns += 1
+                        stats.total_cost_usd += completion.cost_usd
+                        stats.total_input_tokens += completion.usage.input_tokens
+                        stats.total_output_tokens += completion.usage.output_tokens
+                        _emit({"kind": "stream_end", "usage": {"inputTokens": completion.usage.input_tokens, "outputTokens": completion.usage.output_tokens, "costUsd": completion.cost_usd}})
+                        _emit({"kind": "stats_update", "turns": stats.turns, "costUsd": stats.total_cost_usd, "inputTokens": stats.total_input_tokens, "outputTokens": stats.total_output_tokens})
                         continue
                 else:
                     _emit_captured()
