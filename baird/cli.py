@@ -941,7 +941,7 @@ def update(
                         console.print(f"  {line}")
                 console.print(f"[cyan]restarting daemon on {host_id}…[/cyan]")
                 restart_script = (
-                    "pkill -f 'baird.daemon' 2>/dev/null; sleep 2; "
+                    "pkill -f 'baird.daemon' 2>/dev/null || true; sleep 2; "
                     f"cd {remote_dir} && "
                     "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
                     "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
@@ -953,7 +953,7 @@ def update(
                         ["ssh", ssh_host, restart_script],
                         capture_output=True, text=True, timeout=15,
                     )
-                    if r2.returncode != 0:
+                    if r2.returncode != 0 and "restart_ok" not in (r2.stdout or ""):
                         console.print(f"[yellow]{host_id} restart failed[/yellow]\n{r2.stderr[:200] or r2.stdout[:200]}")
                     else:
                         console.print(f"[green]{host_id} updated[/green]")
