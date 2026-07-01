@@ -1936,31 +1936,9 @@ def doctor(
                     else:
                         fail(f"SSH tunnel {tstatus}", sections)
 
-                # 5. Token — regenerate if missing
+                # 5. Token
                 if not token:
-                    if fix and fwd_port:
-                        fxd("missing token — re-enrolling", sections)
-                        from .satellite import TunnelSpec, install_tunnel
-                        tspec = TunnelSpec(ssh_host=ssh_host, local_fwd_port=fwd_port, satellite_port=actual_port)
-                        install_tunnel(tspec)
-                        time.sleep(1)
-                        _tunnel_cmd("restart", ssh_host)
-                        time.sleep(2)
-                        env_file = tspec.baird_config_dir / f"tunnel-{ssh_host}.env"
-                        if env_file.exists():
-                            for line in env_file.read_text().splitlines():
-                                if line.startswith("EXECUTOR_TOKEN="):
-                                    token = line.split("=", 1)[1].strip()
-                                    entry["executor_auth_token"] = token
-                                    save_registry(reg)
-                                    ok("token regenerated from tunnel env file", sections)
-                                    break
-                            else:
-                                fail("could not extract token from env file", sections)
-                        else:
-                            fail("tunnel env file not created", sections)
-                    else:
-                        fail("missing executor_auth_token", sections)
+                    fail("missing executor auth token — re-enroll: baird satellite enroll --host-id GPU-wrkstn <ssh-host>", sections)
 
                 # 6. Round-trip
                 if fwd_port and token:
@@ -1970,7 +1948,20 @@ def doctor(
                             h = ec.health()
                         ok(f"executor round-trip OK", sections)
                     except Exception as e:
-                        fail(f"executor unreachable: {e}", sections)
+                        es = str(e)
+                        if "404" in es:
+                            # Old daemon without /exec/health — try TCP connect instead
+                            import socket as _sk
+                            try:
+                                s = _sk.create_connection(("127.0.0.1", fwd_port), timeout=3)
+                                s.close()
+                                ok(f"TCP port {fwd_port} reachable (daemon may need update)", sections)
+                            except Exception:
+                                fail(f"port {fwd_port} not reachable", sections)
+                        elif "403" in es:
+                            fail(f"auth mismatch on port {fwd_port} — token may be wrong", sections)
+                        else:
+                            fail(f"executor unreachable: {es[:80]}", sections)
                 else:
                     fail("missing fwd_port or token", sections)
 
