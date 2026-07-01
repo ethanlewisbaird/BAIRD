@@ -142,10 +142,14 @@ def _main() -> None:
         else:
             _emit({"kind": "text_delta", "delta": delta})
 
-    def _format_output(content: str) -> str:
-        """Format tool result for human-readable display."""
-        if not content:
-            return content
+    # Track last output to avoid repeating identical tool results
+    _last_output: str = ""
+
+    def _format_output(content: str) -> str | None:
+        """Format tool result for human-readable display.  Returns None to skip."""
+        nonlocal _last_output
+        if not content or content.strip() in ("[]", "{}", "ok", "(empty stdout)"):
+            return None
         # Try to parse as JSON
         try:
             obj = json.loads(content)
@@ -153,9 +157,9 @@ def _main() -> None:
             if isinstance(obj, dict) and "stdout" in obj:
                 out = obj.get("stdout", "") or ""
                 if out:
-                    lines = out.strip().split("\n")
-                    return "\n".join(lines[:20])  # first 20 lines
-                return "(empty stdout)"
+                    lines = out.strip().split("\n")[:20]
+                    return "\n".join(lines)
+                return None
             # Project list — flatten to name: id
             if isinstance(obj, list) and len(obj) > 0 and isinstance(obj[0], dict) and "id" in obj[0]:
                 lines = []
@@ -168,10 +172,30 @@ def _main() -> None:
                 if len(obj) > 10:
                     lines.append(f"  ... and {len(obj) - 10} more")
                 return "\n".join(lines)
-            # Other JSON — pretty print
+            # Single location entry — one line
+            if isinstance(obj, dict) and "host" in obj and "path" in obj:
+                return f"  {obj.get('host','?')}:{obj.get('path','?')} ({obj.get('role','?')})"
+            # Location list — flatten
+            if isinstance(obj, list) and len(obj) > 0 and isinstance(obj[0], dict) and "host" in obj[0]:
+                lines = []
+                for item in obj[:10]:
+                    lines.append(f"  {item.get('host','?')}:{item.get('path','?')} ({item.get('role','?')})")
+                if len(obj) > 10:
+                    lines.append(f"  ... and {len(obj) - 10} more")
+                return "\n".join(lines)
+            # Other JSON — compact
             return json.dumps(obj, indent=2)[:2000]
         except (json.JSONDecodeError, TypeError):
             pass
+        # Plain text — skip boilerplate error messages
+        if "Client error" in content or "Server error" in content:
+            # Extract just the status + url component
+            import re as _re
+            m = _re.search(r"(\d{3})\b", content)
+            path = content.split("url '")[1].split("'")[0] if "url '" in content else ""
+            endpoint = path.rsplit("/", 1)[-1] if path else "?"
+            if m:
+                return f"{m.group(1)} Forbidden: {endpoint}"
         return content[:2000]
 
     def _on_tool_event(event: str, detail: str) -> None:
@@ -184,13 +208,17 @@ def _main() -> None:
         elif event == "result":
             name = detail.split(":")[0]
             tc_id = _last_started_id.get(name, f"tc_{name}")
-            # Extract content after "name: " — handle multi-line results
             content = detail.strip()
             if content.startswith(name + ":"):
                 content = content[len(name) + 1:].strip()
             _emit({"kind": "tool_completed", "invocationId": tc_id})
             formatted = _format_output(content)
-            _emit({"kind": "tool_output", "invocationId": tc_id, "chunk": formatted})
+            if formatted is not None:
+                # Skip if identical to last output (deduplicate)
+                if formatted == _last_output:
+                    return
+                _last_output = formatted
+                _emit({"kind": "tool_output", "invocationId": tc_id, "chunk": formatted})
         elif event == "blocked":
             _emit({"kind": "error", "text": f"blocked: {detail[:80]}"})
         elif event == "files":
@@ -422,7 +450,7 @@ def _main() -> None:
     from rich.console import Console as _RichConsole
 
     _capture_buffer = _io.StringIO()
-    _capture_console = _RichConsole(file=_capture_buffer, force_terminal=False, highlight=False)
+    _capture_console = _RichConsole(file=_capture_buffer, force_terminal=False, highlight=False, no_color=True)
 
     def _emit_captured() -> None:
         text = _capture_buffer.getvalue()
