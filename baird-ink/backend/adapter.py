@@ -373,6 +373,42 @@ def _main() -> None:
 
         _save_connect_key((label, env_var, url), key)
 
+    # ── Slash dispatch wrapper ──
+    # Rich Console that renders to a string buffer, which we then emit as JSON
+    import io as _io
+    from rich.console import Console as _RichConsole
+
+    _capture_buffer = _io.StringIO()
+    _capture_console = _RichConsole(file=_capture_buffer, force_terminal=False, highlight=False)
+
+    def _emit_captured() -> None:
+        text = _capture_buffer.getvalue()
+        _capture_buffer.truncate(0)
+        _capture_buffer.seek(0)
+        if text.strip():
+            _emit({"kind": "status", "text": text.strip()})
+
+    # Dialog-based input_fn for interactive slash commands.
+    # When a slash command calls input_fn(prompt), we emit a text-input dialog
+    # and wait for the response from stdin.
+    _dialog_id_counter: int = 0
+
+    def _dialog_input_fn(prompt: str) -> str:
+        nonlocal _dialog_id_counter
+        _dialog_id_counter += 1
+        _emit_captured()  # flush any buffered console output before the prompt
+        _emit({
+            "kind": "dialog",
+            "id": f"slash_{_dialog_id_counter}",
+            "title": prompt.strip().rstrip(":").rstrip(),
+            "body": prompt,
+            "choices": [],
+        })
+        try:
+            return _input_fn("")
+        except EOFError:
+            return ""
+
     # ── Main loop ──
     diff_loop_active = True
 
@@ -422,8 +458,32 @@ def _main() -> None:
                 _emit({"kind": "status", "text": epoch.baseline})
                 continue
             else:
-                _emit({"kind": "error", "text": f"unknown command: /{cmd} (try /help)"})
-                continue
+                # Try the full slash dispatch for hub-first commands
+                from baird.agent_tools import ToolEnv
+                from baird.slash import SlashContext, try_dispatch as _try_slash
+                _emit_captured()
+                slash_ctx = SlashContext(
+                    hub=hub,
+                    env=ToolEnv(hub=hub, project_id=config.project_id),
+                    input_fn=_dialog_input_fn,
+                    console=_capture_console,
+                    active_host=None,
+                    tool_registry=tool_registry,
+                )
+                slash_res = _try_slash(line[1:], slash_ctx)
+                if slash_res is not None and slash_res.handled:
+                    _emit_captured()
+                    if slash_res.output:
+                        _emit({"kind": "status", "text": slash_res.output})
+                    if slash_res.next_user_prompt:
+                        line = slash_res.next_user_prompt
+                        # Fall through to model turn
+                    else:
+                        continue
+                else:
+                    _emit_captured()
+                    _emit({"kind": "error", "text": f"unknown command: /{cmd} (try /help)"})
+                    continue
 
         _emit({"kind": "user_message", "text": line})
         _emit({"kind": "turn_start"})
