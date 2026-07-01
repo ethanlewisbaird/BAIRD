@@ -941,7 +941,8 @@ def update(
                         console.print(f"  {line}")
                 console.print(f"[cyan]restarting daemon on {host_id}…[/cyan]")
                 restart_script = (
-                    "pkill -f 'baird.daemon' 2>/dev/null || true; sleep 2; "
+                    "old=$(pgrep -f 'python.*baird.daemon' || true); "
+                    "[ -n \"$old\" ] && kill $old 2>/dev/null || true; sleep 2; "
                     f"cd {remote_dir} && "
                     "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
                     "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
@@ -954,7 +955,11 @@ def update(
                         capture_output=True, text=True, timeout=15,
                     )
                     if r2.returncode != 0 and "restart_ok" not in (r2.stdout or ""):
-                        console.print(f"[yellow]{host_id} restart failed[/yellow]\n{r2.stderr[:200] or r2.stdout[:200]}")
+                        console.print(f"[yellow]{host_id} restart failed ({r2.returncode})[/yellow]")
+                        err = (r2.stderr or r2.stdout or "").strip()
+                        if err:
+                            for line in err.splitlines()[-5:]:
+                                console.print(f"  [dim]{line}[/dim]")
                     else:
                         console.print(f"[green]{host_id} updated[/green]")
                 except Exception:
