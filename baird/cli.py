@@ -1754,6 +1754,188 @@ def _tunnel_cmd(action: str, ssh_host: str | None = None) -> None:
 
 
 @app.command()
+def doctor(
+    check_satellites: bool = typer.Option(
+        True, "--check-satellites/--no-check-satellites",
+        help="Also run health checks on every enrolled satellite",
+    ),
+    fix: bool = typer.Option(
+        True, "--fix/--no-fix", help="Automatically fix issues where possible"
+    ),
+) -> None:
+    """Check health of the BAIRD hub and all enrolled satellites."""
+    import subprocess as sp
+    import time
+
+    all_checks: list[dict] = []
+    hub_ok = True
+
+    def ok(msg: str, section: str = "") -> None:
+        all_checks.append({"status": "ok", "msg": msg, "section": section})
+
+    def fail(msg: str, section: str = "") -> None:
+        all_checks.append({"status": "fail", "msg": msg, "section": section})
+
+    def fxd(msg: str, section: str = "") -> None:
+        all_checks.append({"status": "fix", "msg": msg, "section": section})
+
+    # ── Hub checks ──
+    console.print("[bold]🏠 Hub[/bold]")
+
+    from .config import load_hub_config
+    from .supervisor import ensure_hub_running, is_hub_running
+
+    hub_cfg = load_hub_config()
+    host, port = hub_cfg.listen.split(":")
+
+    # Hub process
+    if is_hub_running():
+        ok(f"hub process running on {host}:{port}", "hub")
+    else:
+        if fix:
+            fxd("hub not running — starting", "hub")
+            ensure_hub_running(quiet=True)
+            time.sleep(2)
+            if is_hub_running():
+                ok("hub process started", "hub")
+            else:
+                fail("hub failed to start", "hub")
+                hub_ok = False
+        else:
+            fail(f"hub not running on {host}:{port}", "hub")
+            hub_ok = False
+
+    # Hub connectivity
+    if hub_ok:
+        try:
+            from .memory_client import HubClient
+            with HubClient(f"http://{host}:{port}", hub_cfg.auth_token) as hc:
+                projects = hc.list_projects()
+            ok(f"hub API reachable — {len(projects)} project(s)", "hub")
+        except Exception as e:
+            fail(f"hub API unreachable: {e}", "hub")
+            hub_ok = False
+
+    # Secrets
+    from .paths import secrets_env_path
+    senv = secrets_env_path()
+    if senv.exists():
+        content = senv.read_text().strip()
+        lines = [l for l in content.splitlines() if l.strip() and not l.startswith("#")]
+        keys = [l.split("=")[0].strip() for l in lines if "=" in l]
+        ok(f"secrets.env — {len(keys)} key(s): {', '.join(keys[:5])}", "hub")
+    else:
+        fail("secrets.env not found — run /connect to set API keys", "hub")
+
+    # ── Satellite checks ──
+    if check_satellites:
+        from .satellite import load_registry
+        reg = load_registry()
+        if not reg:
+            console.print("\n[yellow]  no satellites enrolled — skipping[/yellow]")
+        else:
+            for host_id, entry in sorted(reg.items()):
+                console.print(f"\n[bold]🛰  {host_id}[/bold]")
+                sections = f"satellite:{host_id}"
+                ssh_host = entry.get("ssh_host", host_id)
+                fwd_port = entry.get("local_fwd_port")
+                remote_dir = entry.get("remote_baird_dir", "$HOME/code/BAIRD")
+                token = entry.get("executor_auth_token", "")
+
+                # SSH
+                def _ssh(cmd: str, timeout: float = 10) -> sp.CompletedProcess:
+                    return sp.run(
+                        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", ssh_host, cmd],
+                        capture_output=True, text=True, timeout=timeout,
+                    )
+
+                r = _ssh("echo pong", timeout=8)
+                if r.returncode != 0:
+                    fail(f"SSH to {ssh_host}: {r.stderr.strip() or 'no route'}", sections)
+                    continue
+                ok(f"SSH to {ssh_host}", sections)
+
+                # Daemon listening
+                r = _ssh("ss -tlnp 2>/dev/null | grep ':8765'", timeout=10)
+                if r.stdout.strip():
+                    ok("daemon listening on :8765", sections)
+                else:
+                    r2 = _ssh("ss -tlnp 2>/dev/null | grep -E ':(87[0-9]{2})'", timeout=10)
+                    if r2.stdout.strip():
+                        lines = [l.strip() for l in r2.stdout.splitlines() if "LISTEN" in l]
+                        ports = []
+                        for ln in lines[:3]:
+                            import re
+                            m = re.search(r":(\d+)", ln)
+                            if m:
+                                ports.append(m.group(1))
+                        fail(f"daemon on wrong port(s): {','.join(ports)} (expected 8765)", sections)
+                    else:
+                        if fix:
+                            fxd("daemon not running — starting", sections)
+                            start_script = (
+                                f"cd {remote_dir} && "
+                                "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
+                                "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
+                                "</dev/null >/tmp/baird-daemon.log 2>&1 & disown"
+                            )
+                            try:
+                                _ssh(start_script, timeout=15)
+                                time.sleep(3)
+                                r3 = _ssh("ss -tlnp 2>/dev/null | grep ':8765'", timeout=10)
+                                if r3.stdout.strip():
+                                    ok("daemon started", sections)
+                                else:
+                                    fail("daemon failed to start", sections)
+                            except sp.TimeoutExpired:
+                                fail("start command timed out", sections)
+                        else:
+                            fail("daemon not running", sections)
+
+                # Tunnel
+                from .satellite import tunnel_status
+                tstatus = tunnel_status(ssh_host)
+                if tstatus == "active":
+                    ok("SSH tunnel active", sections)
+                else:
+                    fail(f"SSH tunnel {tstatus}", sections)
+
+                # Round-trip
+                if fwd_port and token:
+                    try:
+                        from .executor_client import ExecutorClient
+                        with ExecutorClient(f"http://127.0.0.1:{fwd_port}", token, timeout=5) as ec:
+                            h = ec.health()
+                        ok(f"executor health OK", sections)
+                    except Exception as e:
+                        fail(f"executor unreachable: {e}", sections)
+                else:
+                    fail("missing fwd_port or token — cannot check", sections)
+
+    # ── Summary ──
+    console.print()
+    sections_seen: set[str] = set()
+    for c in all_checks:
+        sec = c["section"]
+        if sec and sec not in sections_seen:
+            console.print(f"  [dim]{sec}[/dim]")
+            sections_seen.add(sec)
+        icon = {"ok": "✅", "fail": "❌", "fix": "🔧"}.get(c["status"], "?")
+        style = {"ok": "green", "fail": "red", "fix": "yellow"}.get(c["status"], "")
+        console.print(f"  {icon} [{style}]{c['msg']}[/{style}]")
+
+    has_error = any(c["status"] == "fail" for c in all_checks)
+    total_ok = sum(1 for c in all_checks if c["status"] == "ok")
+    total_fix = sum(1 for c in all_checks if c["status"] == "fix")
+
+    console.print()
+    if has_error:
+        console.print(f"[yellow]⚠  {total_ok} ok, {total_fix} fixed, some failures remain[/yellow]")
+    else:
+        console.print(f"[bold green]✅ {total_ok} ok, {total_fix} fixed — all checks passed[/bold green]")
+
+
+@app.command()
 def debug_session(
     session_id: str = typer.Argument(..., help="Session UUID to inspect"),
     limit: int = typer.Option(50, "--limit", "-n", help="Max messages to show"),
