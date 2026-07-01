@@ -147,7 +147,6 @@ def _main() -> None:
 
     def _format_output(content: str) -> str | None:
         """Format tool result for human-readable display.  Returns None to skip."""
-        nonlocal _last_output
         if not content or content.strip() in ("[]", "{}", "ok", "(empty stdout)"):
             return None
         # Try to parse as JSON
@@ -199,7 +198,7 @@ def _main() -> None:
         return content[:2000]
 
     def _on_tool_event(event: str, detail: str) -> None:
-        nonlocal _pending_start_ids, _last_started_id
+        nonlocal _pending_start_ids, _last_started_id, _last_output
         if event == "call":
             name = detail.split("(")[0]
             tc_id = _pending_start_ids.pop(0) if _pending_start_ids else f"tc_{name}"
