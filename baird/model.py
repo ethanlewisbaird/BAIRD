@@ -364,11 +364,15 @@ class OpenRouterClient:
         return ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY")
 
     def _key_for(self, model: str) -> str:
-        """Return the API key appropriate for the model's backend."""
+        """Return the API key appropriate for the model's backend.
+
+        Always reads the current env var so `/connect` updates take effect
+        immediately (without restarting the process).
+        """
         _, env = self._backend_for(model)
         if env == "OPENCODE_API_KEY":
-            return self._opencode_key or os.getenv("OPENCODE_API_KEY", "") or ""
-        return self._openrouter_key or os.getenv("OPENROUTER_API_KEY", "") or ""
+            return os.getenv("OPENCODE_API_KEY") or self._opencode_key or ""
+        return os.getenv("OPENROUTER_API_KEY") or self._openrouter_key or ""
 
     def _build_messages(
         self, messages: list[dict[str, Any]], *, system: str | None
