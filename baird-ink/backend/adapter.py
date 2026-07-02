@@ -656,6 +656,8 @@ def _main() -> None:
             )
         except Exception as e:
             err = str(e)
+            # Stop the streaming counter in the UI
+            _emit({"kind": "stream_end", "usage": {"inputTokens": 0, "outputTokens": 0, "costUsd": 0}})
             # Provide more helpful error messages for common API errors
             if "500" in err or "502" in err or "503" in err or "504" in err:
                 _emit({"kind": "error", "text": f"{err}\n[dim]try /model <id> to switch models, or retry the request[/dim]"})
