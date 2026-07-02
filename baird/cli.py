@@ -940,9 +940,25 @@ def update(
                     for line in lines:
                         console.print(f"  {line}")
                     console.print(f"[green]{host_id} code updated[/green]")
-                # Note: daemon restart is now handled separately via:
-                #   baird satellite restart-daemon <host_id>
-                # This avoids SSH timeout issues during complex restart scripts.
+                # Restart daemon — fire-and-forget via Popen so it never blocks
+                import subprocess as _sp2
+                kill_script = "pkill -f 'python.*baird.daemon' 2>/dev/null; sleep 1"
+                _sp2.Popen(
+                    ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", ssh_host, kill_script],
+                    stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL, stdin=_subprocess.DEVNULL,
+                )
+                _time.sleep(1)
+                start_script = (
+                    f"cd {remote_dir} && "
+                    "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
+                    "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
+                    "</dev/null >/tmp/baird-daemon.log 2>&1 &"
+                )
+                _sp2.Popen(
+                    ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", ssh_host, start_script],
+                    stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL, stdin=_subprocess.DEVNULL,
+                )
+                console.print(f"[green]{host_id} daemon restarting[/green]")
 
     # 3. Restart local hub (+ daemon) with new code
     if not sat_only:
