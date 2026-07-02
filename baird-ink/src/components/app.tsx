@@ -18,6 +18,11 @@ export function App() {
   const inputRef = useRef(inputValue);
   inputRef.current = inputValue;
 
+  // Message history for up/down arrow recall
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const savedInput = useRef('');
+
   // Slash command suggestions
   const showSuggestions = inputValue.startsWith('/') && inputValue.length > 1;
   const suggestions = showSuggestions ? matching(COMMANDS, inputValue.slice(1)) : [];
@@ -222,7 +227,6 @@ function readLineCooked(): Promise<string> {
         setSelectedSuggestion((i) => (i < suggestions.length - 1 ? i + 1 : 0));
         return;
       }
-      // Enter/Tab complete with highlighted suggestion (don't submit)
       if (key.return || key.tab) {
         const cmd = suggestions[clampedSelected].cmd;
         setInputValue('/' + cmd + ' ');
@@ -231,11 +235,35 @@ function readLineCooked(): Promise<string> {
       }
     }
 
+    // Up/down arrow history navigation (when no suggestions showing)
+    if ((key.upArrow || key.downArrow) && history.length > 0) {
+      const last = history.length - 1;
+      let newIdx: number;
+      if (historyIndex === -1) {
+        // First arrow press: save current input and start from end
+        savedInput.current = inputRef.current;
+        newIdx = key.downArrow ? last : last;
+      } else {
+        newIdx = key.upArrow ? historyIndex - 1 : historyIndex + 1;
+        if (newIdx < 0) { savedInput.current = ''; setInputValue(''); setHistoryIndex(-1); return; }
+        if (newIdx >= last) { newIdx = last; }
+      }
+      setHistoryIndex(newIdx);
+      setInputValue(history[newIdx]);
+      return;
+    }
+
     if (key.return) {
       const text = inputRef.current.trim();
       if (!text) return;
+      // Add to history (avoid duplicate consecutive entries)
+      if (history.length === 0 || history[history.length - 1] !== text) {
+        setHistory((h) => [...h.slice(-99), text]);
+      }
       setInputValue('');
       setSelectedSuggestion(0);
+      setHistoryIndex(-1);
+      savedInput.current = '';
 
       if (text.startsWith('/')) {
         const cmd = text.slice(1).split(' ')[0].toLowerCase();
