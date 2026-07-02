@@ -84,7 +84,7 @@ export function reduceEvent(state: SessionStore, event: BackendEvent): Partial<S
         streaming: false,
         timestamp: Date.now() / 1000,
       };
-      return { messages: [...state.messages, msg] };
+      return { messages: [...state.messages, msg], lastError: '' };
     }
 
     // ── Turn start ──
@@ -99,7 +99,7 @@ export function reduceEvent(state: SessionStore, event: BackendEvent): Partial<S
         model: state.model,
         timestamp: Date.now() / 1000,
       };
-      return { messages: [...state.messages, msg] };
+      return { messages: [...state.messages, msg], lastError: '' };
     }
 
     // ── Text delta ──
