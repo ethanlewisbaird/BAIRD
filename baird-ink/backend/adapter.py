@@ -465,7 +465,7 @@ def _main() -> None:
             "kind": "dialog",
             "id": "connect_provider",
             "title": "Connect API Provider",
-            "body": "Select a provider:\n" + "\n".join(f"  {i+1}. {label} ({url})" for i, (label, _, url) in enumerate(providers)),
+            "body": "Select a provider:\n" + "\n".join(f"  {i+1}. {label} ({url})" for i, (label, _, url, _) in enumerate(providers)),
             "choices": [label for label, _, _ in providers],
         })
         try:
