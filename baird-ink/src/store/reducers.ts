@@ -259,7 +259,7 @@ export function reduceEvent(state: SessionStore, event: BackendEvent): Partial<S
 
     // ── Model info ──
     case 'model_info': {
-      return { model: event.model, agentMode: event.agentMode };
+      return { model: event.model, agentMode: event.agentMode, lastError: '' };
     }
 
     default:

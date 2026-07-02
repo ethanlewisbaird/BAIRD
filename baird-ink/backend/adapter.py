@@ -640,6 +640,8 @@ def _main() -> None:
 
         last_user_msg = line
 
+        # Sync model to frontend at every turn
+        _emit({"kind": "model_info", "model": config.model, "agentMode": agent_mode.value})
         _emit({"kind": "user_message", "text": line})
         _emit({"kind": "turn_start"})
         seen_tool_names.clear()
