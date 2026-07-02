@@ -466,7 +466,7 @@ def _main() -> None:
             "id": "connect_provider",
             "title": "Connect API Provider",
             "body": "Select a provider:\n" + "\n".join(f"  {i+1}. {label} ({url})" for i, (label, _, url, _) in enumerate(providers)),
-            "choices": [label for label, _, _ in providers],
+            "choices": [label for label, _, _, _ in providers],
         })
         try:
             raw = _input_fn("")
