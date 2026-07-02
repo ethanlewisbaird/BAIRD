@@ -21,6 +21,7 @@ export const COMMANDS: CommandDef[] = [
   { cmd: 'reset', desc: 'Start a new session', usage: '/reset' },
   { cmd: 'cost', desc: 'Show token usage and cost', usage: '/cost' },
   { cmd: 'model', desc: 'Switch model', usage: '/model [id|number]' },
+  { cmd: 'model-default', desc: 'Set persistent default model', usage: '/model-default <id>' },
   { cmd: 'sessions', desc: 'List recent sessions', usage: '/sessions' },
   { cmd: 'no-diff', desc: 'Disable diff approval prompts', usage: '/no-diff' },
   { cmd: 'mode', desc: 'Toggle agent mode (BUILD/PLAN/AUTO)', usage: '/mode [build|plan|auto]' },

@@ -50,6 +50,15 @@ def secrets_env_path() -> Path:
     return baird_home() / "secrets.env"
 
 
+def default_model_path() -> Path:
+    """`<baird_home>/model.conf` — single line with the default model id.
+
+    Set via `/model-default <id>` in the TUI.  Survives across
+    `baird code` invocations.
+    """
+    return baird_home() / "model.conf"
+
+
 def load_secrets_env(path: Path | None = None) -> dict[str, str]:
     """Parse a simple `KEY=value` file and return the dict. Missing file → {}.
 

@@ -84,10 +84,18 @@ def _main() -> None:
 
     model_client = OpenRouterClient(transport=transport)
 
+    # Load persistent default model if set
+    _default_model = ""
+    from baird.paths import default_model_path as _dmp
+    if _dmp().exists():
+        _default_model = _dmp().read_text().strip()
+
     config = ReplConfig(
         project_id=ctx.project.id,
         project_root=ctx.project_root,
     )
+    if _default_model:
+        config.model = _default_model
 
     session = hub.new_session(
         mode="code",
@@ -279,6 +287,24 @@ def _main() -> None:
         _emit({"kind": "status", "text": f"model: {old} -> {new_model}"})
         _emit({"kind": "model_info", "model": config.model, "agentMode": agent_mode.value})
 
+    def _cmd_model_default(args: list[str]) -> None:
+        """Get/set the persistent default model (saved to ~/.baird/model.conf)."""
+        from baird.paths import default_model_path
+        conf = default_model_path()
+        if not args:
+            current = "?"
+            if conf.exists():
+                current = conf.read_text().strip() or "?"
+            _emit({"kind": "status", "text": f"default model: {current}\nfile: {conf}\nusage: /model-default <id>"})
+            return
+        new_default = " ".join(args).strip()
+        if not new_default:
+            _emit({"kind": "error", "text": "usage: /model-default <id>"})
+            return
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text(new_default + "\n")
+        _emit({"kind": "status", "text": f"default model set: {new_default}\n(will apply on next `baird code` launch)"})
+
     def _cmd_reset() -> None:
         nonlocal session
         session = hub.new_session(mode="code", task_id=f"repl-{config.project_id}", project_id=config.project_id)
@@ -288,7 +314,7 @@ def _main() -> None:
         _emit({"kind": "status", "text": f"turns={stats.turns}  cost=${stats.total_cost_usd:.4f}  tokens={stats.total_input_tokens}->{stats.total_output_tokens}"})
 
     def _cmd_help() -> None:
-        _emit({"kind": "status", "text": "/exit  /context  /reset  /cost  /model [id]  /mode [build|plan|auto]  /retry  /sessions  /project [id|new <id>]  /connect [--file <path>]  /help"})
+        _emit({"kind": "status", "text": "/exit  /context  /reset  /cost  /model [id]  /model-default <id>  /mode [build|plan|auto]  /retry  /sessions  /project [id|new <id>]  /connect [--file <path>]  /help"})
 
     def _cmd_sessions() -> None:
         rows = hub.list_sessions(project_id=config.project_id, limit=20)
@@ -524,6 +550,9 @@ def _main() -> None:
                 continue
             elif cmd == "model":
                 _cmd_model(rest)
+                continue
+            elif cmd == "model-default" or cmd == "default-model":
+                _cmd_model_default(rest)
                 continue
             elif cmd == "mode":
                 if rest and rest[0].lower() in ("build", "plan", "auto"):
