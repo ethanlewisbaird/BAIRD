@@ -358,8 +358,15 @@ class OpenRouterClient:
 
     @staticmethod
     def _backend_for(model: str) -> tuple[str, str]:
-        """Return (base_url, api_key_env_name) for a model ID prefix."""
+        """Return (base_url, api_key_env_name) for a model ID prefix.
+
+        For opencode/ models, checks OPENCODE_API_URL first (allows switching
+        between Zen and Go endpoints), then falls back to Zen.
+        """
         if model.startswith("opencode/"):
+            base = os.environ.get("OPENCODE_API_URL", "").rstrip("/")
+            if base:
+                return (base, "OPENCODE_API_KEY")
             return ("https://opencode.ai/zen/v1", "OPENCODE_API_KEY")
         return ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY")
 
