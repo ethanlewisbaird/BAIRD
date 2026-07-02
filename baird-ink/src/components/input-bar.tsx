@@ -23,6 +23,7 @@ export const COMMANDS: CommandDef[] = [
   { cmd: 'model', desc: 'Switch model', usage: '/model [id|number]' },
   { cmd: 'sessions', desc: 'List recent sessions', usage: '/sessions' },
   { cmd: 'no-diff', desc: 'Disable diff approval prompts', usage: '/no-diff' },
+  { cmd: 'mode', desc: 'Toggle agent mode (BUILD/PLAN/AUTO)', usage: '/mode [build|plan|auto]' },
   { cmd: 'connect', desc: 'Connect an API provider', usage: '/connect [--file <path>]' },
   { cmd: 'project', desc: 'List projects', usage: '/project [id|new <id>|rename|delete]' },
   { cmd: 'project new', desc: 'Create a new project', usage: '/project new <id> [name]' },

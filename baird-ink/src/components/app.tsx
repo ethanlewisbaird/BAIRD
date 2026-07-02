@@ -282,7 +282,8 @@ function readLineCooked(): Promise<string> {
     }
     if (key.tab) {
       if (!inputRef.current.trim()) {
-        // TODO: toggle agent mode
+        // Toggle agent mode
+        adapterRef.current?.sendInput('/mode');
         return;
       }
       setInputValue((v) => v + '    ');

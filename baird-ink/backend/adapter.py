@@ -288,7 +288,7 @@ def _main() -> None:
         _emit({"kind": "status", "text": f"turns={stats.turns}  cost=${stats.total_cost_usd:.4f}  tokens={stats.total_input_tokens}->{stats.total_output_tokens}"})
 
     def _cmd_help() -> None:
-        _emit({"kind": "status", "text": "/exit  /context  /reset  /cost  /model [id]  /sessions  /project [id|new <id>]  /connect [--file <path>]  /help"})
+        _emit({"kind": "status", "text": "/exit  /context  /reset  /cost  /model [id]  /mode [build|plan|auto]  /sessions  /project [id|new <id>]  /connect [--file <path>]  /help"})
 
     def _cmd_sessions() -> None:
         rows = hub.list_sessions(project_id=config.project_id, limit=20)
@@ -524,6 +524,15 @@ def _main() -> None:
                 continue
             elif cmd == "model":
                 _cmd_model(rest)
+                continue
+            elif cmd == "mode":
+                if rest and rest[0].lower() in ("build", "plan", "auto"):
+                    agent_mode = AgentMode(rest[0].lower())
+                else:
+                    agent_mode = agent_mode.toggle()
+                system = _system_prompt(epoch.baseline, mode=agent_mode)
+                _emit({"kind": "model_info", "model": config.model, "agentMode": agent_mode.value})
+                _emit({"kind": "status", "text": f"switched to {agent_mode.badge}"})
                 continue
             elif cmd == "project":
                 _cmd_project(rest)
