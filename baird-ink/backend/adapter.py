@@ -288,7 +288,7 @@ def _main() -> None:
         _emit({"kind": "status", "text": f"turns={stats.turns}  cost=${stats.total_cost_usd:.4f}  tokens={stats.total_input_tokens}->{stats.total_output_tokens}"})
 
     def _cmd_help() -> None:
-        _emit({"kind": "status", "text": "/exit  /context  /reset  /cost  /model [id]  /mode [build|plan|auto]  /sessions  /project [id|new <id>]  /connect [--file <path>]  /help"})
+        _emit({"kind": "status", "text": "/exit  /context  /reset  /cost  /model [id]  /mode [build|plan|auto]  /retry  /sessions  /project [id|new <id>]  /connect [--file <path>]  /help"})
 
     def _cmd_sessions() -> None:
         rows = hub.list_sessions(project_id=config.project_id, limit=20)
@@ -547,6 +547,14 @@ def _main() -> None:
             elif cmd == "context":
                 _emit({"kind": "status", "text": epoch.baseline})
                 continue
+            elif cmd == "retry":
+                if last_user_msg:
+                    _emit({"kind": "status", "text": f"retrying: {last_user_msg[:60]}{'...' if len(last_user_msg) > 60 else ''}"})
+                    line = last_user_msg
+                    # Fall through to model turn
+                else:
+                    _emit({"kind": "error", "text": "no previous message to retry"})
+                    continue
             else:
                 # Try the full slash dispatch for hub-first commands
                 from baird.agent_tools import ToolEnv
@@ -596,6 +604,8 @@ def _main() -> None:
                     _emit({"kind": "error", "text": f"unknown command: /{cmd} (try /help)"})
                     continue
 
+        last_user_msg = line
+
         _emit({"kind": "user_message", "text": line})
         _emit({"kind": "turn_start"})
         seen_tool_names.clear()
@@ -616,7 +626,12 @@ def _main() -> None:
                 on_tool_event=_on_tool_event,
             )
         except Exception as e:
-            _emit({"kind": "error", "text": str(e)})
+            err = str(e)
+            # Provide more helpful error messages for common API errors
+            if "500" in err or "502" in err or "503" in err or "504" in err:
+                _emit({"kind": "error", "text": f"{err}\n[dim]try /model <id> to switch models, or retry the request[/dim]"})
+            else:
+                _emit({"kind": "error", "text": err})
             continue
 
         stats.turns += 1
