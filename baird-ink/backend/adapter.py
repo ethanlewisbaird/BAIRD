@@ -34,7 +34,12 @@ def _main() -> None:
             _line = _line.strip()
             if _line and "=" in _line and not _line.startswith("#"):
                 _k, _v = _line.split("=", 1)
-                os.environ.setdefault(_k.strip(), _v.strip())
+                # Use secrets.env value if the key isn't already set or is empty
+                if not os.environ.get(_k.strip(), "").strip():
+                    os.environ[_k.strip()] = _v.strip()
+    # Debug: verify key is loaded
+    _has_key = "OPENCODE_API_KEY" in os.environ
+    _key_preview = os.environ.get("OPENCODE_API_KEY", "")[:8] + "..." if _has_key else "NOT SET"
 
     from baird.config import load_host_config
     from baird.memory_client import HubClient
@@ -118,7 +123,7 @@ def _main() -> None:
         sys.stdout.flush()
 
     _emit({"kind": "model_info", "model": config.model, "agentMode": agent_mode.value})
-    _emit({"kind": "status", "text": f"session={session['id'][:8]}  project={config.project_id}  model={config.model}"})
+    _emit({"kind": "status", "text": f"session={session['id'][:8]}  project={config.project_id}  model={config.model}  key={_key_preview}"})
     _emit({"kind": "stats_update", "turns": 0, "costUsd": 0.0, "inputTokens": 0, "outputTokens": 0})
 
     _tool_call_counts: dict[str, int] = {}
