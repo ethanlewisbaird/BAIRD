@@ -183,7 +183,7 @@ def code(
         None,
         "--model",
         "-m",
-        help="OpenRouter model id. Falls back to $OPENROUTER_MODEL, then the REPL default.",
+        help="Model id. Falls back to $BAIRD_MODEL, then $OPENROUTER_MODEL, then the default.",
     ),
     session: str | None = typer.Option(
         None, "--session", help="Resume a specific session id instead of the project default."
@@ -255,7 +255,11 @@ def code(
     from .repl import ReplConfig, run_repl
 
     import os as _os
-    resolved_model = model or _os.environ.get("OPENROUTER_MODEL")
+    resolved_model = (
+        model
+        or _os.environ.get("BAIRD_MODEL")
+        or _os.environ.get("OPENROUTER_MODEL")
+    )
     repl_cfg_kwargs: dict[str, object] = {
         "project_id": ctx.project.id,
         "project_root": ctx.project_root,

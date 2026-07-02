@@ -1,4 +1,5 @@
 import { Box, Text } from 'ink';
+import { useEffect, useState } from 'react';
 import type { Message as Msg } from '../types/index.js';
 import { colors, BAR } from '../theme.js';
 import { useUIStore } from '../store/index.js';
@@ -17,8 +18,27 @@ function fmtTime(ts: number): string {
   return d.toLocaleTimeString('en-US', { hour12: false });
 }
 
+/**
+ * Hook: returns the elapsed seconds since `start`, ticking every second.
+ * Pauses when the component unmounts.
+ */
+function useElapsed(start: number | null): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (start === null) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [start]);
+  if (start === null) return 0;
+  return Math.max(0, Math.floor((now - start) / 1000));
+}
+
 export function Message({ msg }: Props) {
   const showTimestamps = useUIStore((s) => s.showTimestamps);
+
+  // For streaming messages: tick a seconds counter
+  const streamingStart = msg.streaming && msg.timestamp ? msg.timestamp * 1000 : null;
+  const elapsed = useElapsed(streamingStart);
 
   if (msg.role === 'user') {
     return (
@@ -55,7 +75,7 @@ export function Message({ msg }: Props) {
         }
       })}
       {/* Footer: agent badge + model + duration */}
-      {(msg.agentMode || msg.model || (msg.duration ?? 0) > 0) && (
+      {(msg.agentMode || msg.model || (msg.duration ?? 0) > 0 || msg.streaming) && (
         <Box>
           <Text color={colors.textMuted}>{BAR}  </Text>
           {msg.agentMode ? (
@@ -66,11 +86,10 @@ export function Message({ msg }: Props) {
           {msg.model ? (
             <Text color={colors.textMuted}>  {msg.model}  </Text>
           ) : null}
-          {msg.duration ? (
-            <Text color={colors.textMuted}>{msg.duration.toFixed(1)}s</Text>
-          ) : null}
           {msg.streaming ? (
-            <Text color={colors.textMuted}>  streaming…</Text>
+            <Text color={colors.warning}>  ⠋ streaming… {elapsed}s</Text>
+          ) : msg.duration ? (
+            <Text color={colors.textMuted}>{msg.duration.toFixed(1)}s</Text>
           ) : null}
         </Box>
       )}
