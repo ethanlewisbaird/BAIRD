@@ -93,6 +93,10 @@ export function Message({ msg }: Props) {
           ) : null}
         </Box>
       )}
+      {/* Show placeholder when response is empty and not streaming */}
+      {!msg.streaming && msg.parts.length === 0 && msg.duration ? (
+        <Text color={colors.textMuted}>{BAR}  (no response)</Text>
+      ) : null}
     </Box>
   );
 }
