@@ -219,7 +219,7 @@ class ReplStats:
 class ReplConfig:
     project_id: str
     model: str = "opencode/deepseek-v4-flash-free"
-    max_tokens: int = 1024
+    max_tokens: int = 8192
     temperature: float = 0.2
     history_cap: int = HISTORY_TURN_CAP
     project_root: Path | None = None  # required for diff_apply
