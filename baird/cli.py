@@ -1549,44 +1549,26 @@ def satellite_restart_daemon(
 
     console.print(f"[cyan]restarting daemon on {host_id} ({ssh_host})…[/cyan]")
 
-    kill_script = (
-        f"fuser -k {port}/tcp 2>/dev/null; "
-        f"echo kill_exit=$?"
+    import subprocess as _sp3
+    kill_script = f"fuser -k {port}/tcp 2>/dev/null; sleep 1"
+    _sp3.Popen(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", ssh_host, kill_script],
+        stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL, stdin=_subprocess.DEVNULL,
     )
-    r = _subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", ssh_host, kill_script],
-        capture_output=True, text=True, timeout=15,
-    )
-    if r.returncode != 0:
-        console.print(f"[yellow]kill step had issues: {r.stderr.strip() or r.stdout.strip()}[/yellow]")
-    else:
-        console.print(f"[green]killed old daemon on port {port}[/green]")
-
     import time
-    time.sleep(1)
-
+    time.sleep(2)
     start_script = (
         f"cd {remote_dir} && "
         "nohup env PATH=\"$HOME/.local/bin:$PATH\" "
         "\"$HOME/.local/bin/uv\" run python -m baird.daemon "
-        "</dev/null >/tmp/baird-daemon.log 2>&1 & "
-        "disown; echo daemon_started=$?"
+        "</dev/null >/tmp/baird-daemon.log 2>&1 &"
     )
-    try:
-        r2 = _subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", ssh_host, start_script],
-            capture_output=True, text=True, timeout=15,
-        )
-        if r2.returncode != 0:
-            console.print(f"[red]start step failed[/red]\n{r2.stderr.strip() or r2.stdout.strip()}")
-            raise typer.Exit(1)
-        console.print(f"[green]daemon started on {host_id}[/green]")
-    except _subprocess.TimeoutExpired:
-        console.print("[yellow]start command timed out (daemon may still be booting)[/yellow]")
-
-    time.sleep(3)
-    console.print(f"[dim]check: systemctl --user status baird-tunnel@{ssh_host}[/dim]")
-    console.print(f"[dim]log: ssh {ssh_host} 'tail -20 /tmp/baird-daemon.log'[/dim]")
+    _sp3.Popen(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", ssh_host, start_script],
+        stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL, stdin=_subprocess.DEVNULL,
+    )
+    console.print(f"[green]daemon restarting on {host_id}[/green]")
+    console.print(f"[dim]tail -20 /tmp/baird-daemon.log[/dim]")
 
 
 @satellite_app.command("doctor")
@@ -1959,7 +1941,7 @@ def doctor(
                             try:
                                 s = _sk.create_connection(("127.0.0.1", fwd_port), timeout=3)
                                 s.close()
-                                ok(f"TCP port {fwd_port} reachable (daemon may need update)", sections)
+                                ok(f"TCP port {fwd_port} reachable", sections)
                             except Exception:
                                 fail(f"port {fwd_port} not reachable", sections)
                         elif "403" in es:
