@@ -387,7 +387,11 @@ def _main() -> None:
         session = hub.find_or_create_session_for_task(task_id=f"repl-{target_id}", project_id=target_id, mode="code")
         _emit({"kind": "status", "text": f"switched to project {target_id}  session={session['id'][:8]}"})
 
-    def _save_connect_key(provider: tuple[str, str, str], key: str) -> None:
+    def _save_connect_key(
+        provider: tuple[str, str, str],
+        key: str,
+        extra_vars: dict[str, str] | None = None,
+    ) -> None:
         label, env_var, _url = provider
         if not key.strip():
             _emit({"kind": "error", "text": "no key provided"})
@@ -403,16 +407,25 @@ def _main() -> None:
                     k, v = line.split("=", 1)
                     existing[k.strip()] = v.strip()
         existing[env_var] = key.strip()
+        if extra_vars:
+            existing.update(extra_vars)
         env_path.write_text("\n".join(f"{k}={v}" for k, v in sorted(existing.items())) + "\n")
         env_path.chmod(0o600)
         os.environ[env_var] = key.strip()
-        _emit({"kind": "status", "text": f"connected to {label} — key saved"})
+        if extra_vars:
+            os.environ.update(extra_vars)
+        url_set = extra_vars.get("OPENCODE_API_URL", "") if extra_vars else ""
+        suffix = f" (endpoint: {url_set})" if url_set else ""
+        _emit({"kind": "status", "text": f"connected to {label} — key saved{suffix}"})
 
     def _cmd_connect(args: list[str] | None = None) -> None:
+        # (label, env_var, url, extra_env_vars)
         providers = [
-            ("OpenRouter", "OPENROUTER_API_KEY", "https://openrouter.ai/keys"),
-            ("OpenCode Zen", "OPENCODE_API_KEY", "https://opencode.ai/auth (free tier)"),
-            ("OpenCode Go", "OPENCODE_API_KEY", "https://opencode.ai/auth (subscription)"),
+            ("OpenRouter", "OPENROUTER_API_KEY", "https://openrouter.ai/keys", {}),
+            ("OpenCode Zen", "OPENCODE_API_KEY", "https://opencode.ai/auth (free tier)",
+             {"OPENCODE_API_URL": "https://opencode.ai/zen/v1"}),
+            ("OpenCode Go", "OPENCODE_API_KEY", "https://opencode.ai/auth (subscription)",
+             {"OPENCODE_API_URL": "https://opencode.ai/zen/go/v1"}),
         ]
 
         # Read key from file: /connect [number] --file <path>
@@ -427,7 +440,8 @@ def _main() -> None:
                     try:
                         key = Path(filepath).expanduser().read_text().strip()
                         if key:
-                            _save_connect_key(providers[provider_idx], key)
+                            p = providers[provider_idx]
+                            _save_connect_key((p[0], p[1], p[2]), key, p[3])
                             return
                     except OSError as e:
                         _emit({"kind": "error", "text": f"read failed: {e}"})
@@ -441,7 +455,8 @@ def _main() -> None:
         if args and len(args) >= 2 and args[0].isdigit():
             idx = int(args[0]) - 1
             if 0 <= idx < len(providers):
-                _save_connect_key(providers[idx], " ".join(args[1:]))
+                p = providers[idx]
+                _save_connect_key((p[0], p[1], p[2]), " ".join(args[1:]), p[3])
                 return
             _emit({"kind": "error", "text": f"invalid provider: {args[0]}"})
             return
@@ -466,7 +481,7 @@ def _main() -> None:
             _emit({"kind": "error", "text": "invalid selection"})
             return
 
-        label, env_var, url = providers[idx]
+        label, env_var, url, extra = providers[idx]
         _emit({
             "kind": "dialog",
             "id": "connect_key",
@@ -483,7 +498,7 @@ def _main() -> None:
             _emit({"kind": "error", "text": "no key provided — cancelled"})
             return
 
-        _save_connect_key((label, env_var, url), key)
+        _save_connect_key((label, env_var, url), key, extra)
 
     # ── Slash dispatch wrapper ──
     # Rich Console that renders to a string buffer, which we then emit as JSON
